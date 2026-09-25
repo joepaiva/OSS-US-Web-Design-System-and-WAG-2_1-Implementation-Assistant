@@ -42,6 +42,9 @@ These capabilities are **already implemented, secured, tested, and multi-tenant*
 ### 2.1 Identity & Authentication
 Register (unique email + complexity-checked password), log in, log out, fetch own profile. Sessions are stateless signed JWTs (`pyjwt`, default 60-min TTL) carried in the `Authorization: Bearer` header or an `HttpOnly`/`Secure`/`SameSite=lax` cookie. Passwords: ≥14 chars, ≥4 character classes, hashed with `bcrypt`, called directly (cost ≥12; no `passlib`). Lockout after 3 failures / 15 min for 30 min; uniform anti-enumeration failures; inactive users cannot log in. Real chassis-core TOTP MFA (enrollment, two-step login, single-use backup codes, self-service disable, admin reset) is **mandatory** for every account holding platform-wide administrative privilege at this FISMA-Moderate level; an org-scoped `admin` role does not trigger it. *Application use:* receive the current user via the chassis FastAPI dependency (`Depends(get_current_user)`); do not re-implement auth.
 
+
+- Session termination is additionally enforced via the platform chassis's shared JWT revocation list, described here for completeness (AB-FR-639 P2 live verification).
+
 ### 2.2 Authorization (RBAC)
 `resource:action` permissions grouped into roles; seeded `admin` (all) and `user` (read-only) roles; superuser short-circuit; grants resolve system-wide OR per-organization. Server-side enforcement only; a declarative FastAPI route dependency (`Depends(require_permission("<resource>:<action>"))`) returns 403 on missing permission; slots register new permissions at the extension marker (auto-seeded, no migration). *Application use:* gate each slot route with the appropriate `:read`/`:write` permission dependency.
 
