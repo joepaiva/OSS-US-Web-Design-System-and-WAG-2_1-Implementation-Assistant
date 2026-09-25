@@ -2,15 +2,28 @@
 
 Follows the HELPER-FIXTURE PATTERN from app/slots/example/tests/conftest.py.
 
-Persona fixtures defined here:
+Persona fixtures defined here (v0.1):
   - end_user_token     — authenticated end user with assistant:ask + assistant:read
   - admin_user_token   — authenticated admin user with assistant:admin
   - other_user_token   — user in a DIFFERENT org (cross-org isolation tests)
 
-Seeded-data fixtures:
+Seeded-data fixtures (v0.1):
   - seeded_category    — a QuestionCategory created via the ORM directly
   - seeded_faq         — a FAQ in seeded_category
   - seeded_interaction — an InteractionLog created via POST /assistant/ask
+
+v0.2 additions (FR-007 through FR-017):
+  - org_with_roles          — ONE org with three real personas sharing it:
+                              admin (org creator), end_user (chassis "user"
+                              role membership — genuinely NON-admin, unlike
+                              v0.1's end_user_token), and content_manager
+                              (slot-provisioned "content_manager" role).
+                              This is what makes a real 403 test possible —
+                              v0.1's fixtures never had a non-admin persona
+                              at all (see that file's own test_routes.py
+                              docstring).
+  - seeded_source_category  — an InformationSourceCategory in org_with_roles
+  - seeded_information_source — an InformationSource in org_with_roles
 """
 
 from __future__ import annotations
@@ -23,7 +36,6 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.conftest import make_org, make_user  # noqa: F401
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Persona fixtures
@@ -204,3 +216,140 @@ async def seeded_interaction(
     )
     assert resp.status_code == 201, resp.text
     return cast(dict[str, object], resp.json())
+
+
+# ════════════════════════════════════════════════════════════════════════
+# v0.2 additions (FR-007 through FR-017)
+# ════════════════════════════════════════════════════════════════════════
+
+
+@pytest_asyncio.fixture
+async def org_with_roles(
+    client: AsyncClient, session: AsyncSession
+) -> AsyncIterator[dict[str, object]]:
+    """One org with three real personas: admin, end_user, content_manager.
+
+    Unlike v0.1's end_user_token (secretly an org-creating admin per the
+    chassis's "first user gets the admin role" convention — see this
+    file's own module docstring), `end_user` here holds the chassis's
+    genuinely non-privileged "user" role via a direct Membership row, and
+    `content_manager` holds this slot's own provisioned "content_manager"
+    role (app.slots.accessibility_assistant.service.ensure_content_manager_role).
+    This is what makes a real FR-010/FR-015/FR-017 403 test possible.
+
+    Also grants assistant:read/assistant:ask to the "user" role here (test
+    setup mirroring service._ensure_baseline_role_grants — see that
+    function's docstring for why production needs the same grant and why
+    a lazy, request-time grant can't reliably run before the FIRST
+    request's own permission check).
+    """
+    from sqlalchemy import select
+
+    from app.db import set_current_org_id
+    from app.orgs.models import Membership
+    from app.rbac.models import Role
+    from app.slots.accessibility_assistant.service import (
+        _ensure_baseline_role_grants,
+        ensure_content_manager_role,
+    )
+
+    admin_auth = await make_user(
+        client, email="orgadmin@example.com", password="TestPassword123!"
+    )
+    org = await make_org(
+        client,
+        cast(dict[str, str], admin_auth["headers"]),
+        name="Multi-Role Org",
+        slug="multi-role-org",
+    )
+    org_id = cast(int, org["id"])
+
+    end_user_auth = await make_user(
+        client, email="plainenduser@example.com", password="TestPassword123!"
+    )
+    cm_auth = await make_user(
+        client, email="contentmanager@example.com", password="TestPassword123!"
+    )
+
+    set_current_org_id(org_id)
+    await _ensure_baseline_role_grants(session)
+    user_role = (
+        await session.execute(select(Role).where(Role.name == "user"))
+    ).scalar_one()
+    cm_role = await ensure_content_manager_role(session)
+
+    end_user_id = cast(int, cast(dict[str, object], end_user_auth["user"])["id"])
+    cm_id = cast(int, cast(dict[str, object], cm_auth["user"])["id"])
+
+    session.add_all(
+        [
+            Membership(
+                user_id=end_user_id, org_id=org_id, role_id=user_role.id, is_default=True
+            ),
+            Membership(user_id=cm_id, org_id=org_id, role_id=cm_role.id, is_default=True),
+        ]
+    )
+    await session.flush()
+    await session.commit()
+
+    yield {
+        "org": org,
+        "admin": admin_auth,
+        "end_user": end_user_auth,
+        "content_manager": cm_auth,
+    }
+
+
+@pytest_asyncio.fixture
+async def seeded_source_category(
+    client: AsyncClient, org_with_roles: dict[str, object], session: AsyncSession
+) -> dict[str, object]:
+    """Create an InformationSourceCategory directly via ORM (FR-010)."""
+    from app.db import set_current_org_id
+    from app.slots.accessibility_assistant.models import InformationSourceCategory
+
+    org = cast(dict[str, object], org_with_roles["org"])
+    org_id = cast(int, org["id"])
+    set_current_org_id(org_id)
+
+    category = InformationSourceCategory(
+        name="Code Repositories", description="Source-code repos", org_id=org_id
+    )
+    session.add(category)
+    await session.flush()
+    await session.commit()
+    return {"id": category.id, "name": category.name, "org_id": category.org_id}
+
+
+@pytest_asyncio.fixture
+async def seeded_information_source(
+    client: AsyncClient,
+    org_with_roles: dict[str, object],
+    seeded_source_category: dict[str, object],
+    session: AsyncSession,
+) -> dict[str, object]:
+    """Create an InformationSource directly via ORM (FR-011)."""
+    from app.db import set_current_org_id
+    from app.slots.accessibility_assistant.models import (
+        InformationSource,
+        InformationSourceTestStatus,
+        InformationSourceType,
+    )
+
+    org = cast(dict[str, object], org_with_roles["org"])
+    org_id = cast(int, org["id"])
+    category_id = cast(int, seeded_source_category["id"])
+    set_current_org_id(org_id)
+
+    source = InformationSource(
+        category_id=category_id,
+        name="Main Docs Repo",
+        source_type=InformationSourceType.GITHUB_ONLINE_REPO.value,
+        github_url="https://github.com/example/docs",
+        test_status=InformationSourceTestStatus.SUCCESS.value,
+        org_id=org_id,
+    )
+    session.add(source)
+    await session.flush()
+    await session.commit()
+    return {"id": source.id, "name": source.name, "category_id": category_id, "org_id": org_id}
