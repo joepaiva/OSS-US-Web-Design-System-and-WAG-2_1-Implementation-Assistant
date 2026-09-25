@@ -85,6 +85,9 @@ class FAQRead(BaseModel):
     question_category_ids: list[int] = Field(default_factory=list)
     source_category_ids: list[int] = Field(default_factory=list)
     source_ids: list[int] = Field(default_factory=list)
+    # v0.3 (FR-020): platform-level shared resources are visible read-only
+    # to every org's Organization Administrators/Content Managers.
+    is_platform_shared: bool = False
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -221,6 +224,7 @@ class InformationSourceCategoryRead(BaseModel):
     name: str
     description: str | None
     created_by_user_id: int | None
+    is_platform_shared: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -327,6 +331,7 @@ class InformationSourceRead(BaseModel):
     test_status: str
     last_tested_at: datetime | None
     created_by_user_id: int | None
+    is_platform_shared: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -524,3 +529,192 @@ class ContentManagerAssignResponse(BaseModel):
     user_id: int
     org_id: int
     role: str
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# v0.3 increment — FR-017 through FR-022, SR-005 through SR-007, NFR-001
+# ═════════════════════════════════════════════════════════════════════════
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Response Helpfulness Rating (FR-019, T-019)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class HelpfulnessRatingCreate(BaseModel):
+    """Body for POST /api/interaction-logs/{log_id}/rating (FR-019).
+
+    Deliberately a strict discriminated literal — any other value is
+    rejected by the framework with 422 before the service is called.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rating: Literal["helpful", "unhelpful"]
+
+
+class HelpfulnessRatingRead(BaseModel):
+    """Response for a successful helpfulness-rating submission (FR-019)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    interaction_log_id: int
+    rating: Literal["helpful", "unhelpful"]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Administrator Interaction Log View (FR-021, T-021)
+# ────────────────────────────────────────────────────────────────────────
+#
+# Reuses the existing InteractionLogRead schema above (no new shape needed);
+# see routes.py's new interaction_log_router.
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Platform-Level Resource Sharing (FR-020, T-020)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class ShareResourceRequest(BaseModel):
+    """Body for PATCH .../{id}/share on information sources, information
+    source categories, and FAQs (FR-020). `is_shared=False` lets a Platform
+    Administrator un-share a resource they previously shared."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_shared: bool = True
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Automated FAQ Generation from Interaction Logs (FR-017, NFR-001, T-007)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class FAQGenerationSessionCreate(BaseModel):
+    """Body for POST /api/faqs/generation-sessions/ (FR-017)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_logs: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Maximum number of recent interaction logs to review.",
+    )
+
+
+class FAQGenerationSessionCreateResponse(BaseModel):
+    """Response for POST /api/faqs/generation-sessions/ (FR-017)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: int
+    status: str
+    candidate_count: int
+
+
+class FAQGenerationCandidateRead(BaseModel):
+    """One staged candidate returned by GET .../candidates/ (FR-017)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    question: str
+    answer: str
+    question_category_ids: list[int] = Field(default_factory=list)
+    source_category_ids: list[int] = Field(default_factory=list)
+    source_ids: list[int] = Field(default_factory=list)
+    status: str
+
+
+class FAQGenerationApprovedCandidate(FAQCreate):
+    """One approved (and possibly human-edited) candidate submitted back to
+    POST .../confirm/ (FR-017). Extends FAQCreate's own required-field /
+    non-empty-list validation with a reference back to the staged candidate
+    it originated from."""
+
+    candidate_id: int
+
+
+class FAQGenerationConfirmRequest(BaseModel):
+    """Body for POST /api/faqs/generation-sessions/{session_id}/confirm/
+    (FR-017, NFR-001). An empty (or omitted) `approved` list is a valid,
+    explicit "save nothing" confirmation — NFR-001's approval gate means a
+    missing confirmation is always treated as rejection, never as implicit
+    approval."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approved: list[FAQGenerationApprovedCandidate] = Field(default_factory=list)
+
+
+class FAQGenerationConfirmResponse(BaseModel):
+    """Response for the FR-017 confirm endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    created_faq_ids: list[int]
+    discarded_candidate_ids: list[int]
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Automated FAQ Generation from Information Source (FR-018, NFR-001, T-008)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class FAQGenerationFromSourceRequest(BaseModel):
+    """Body for POST /api/faqs/generate (FR-018)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: int
+    max_content_bytes: int = Field(default=20_000, ge=1_000, le=200_000)
+
+
+class FAQGenerationCandidateOut(BaseModel):
+    """One in-memory candidate returned by POST /api/faqs/generate (FR-018).
+    Never persisted — see T-008's own "no staging table" implementation
+    note."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str
+    answer: str
+    question_category_ids: list[int] = Field(default_factory=list)
+    source_category_ids: list[int] = Field(default_factory=list)
+    source_ids: list[int] = Field(default_factory=list)
+
+
+class FAQGenerationFromSourceResponse(BaseModel):
+    """Response for POST /api/faqs/generate (FR-018).
+
+    `blocked=True` means SR-005/SR-006 determined the source content could
+    not be safely or cleanly sent to the LLM (see service.py's
+    generate_faq_candidates_from_source) — `candidates` is then always
+    empty and no LLM call was made.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: int
+    candidates: list[FAQGenerationCandidateOut] = Field(default_factory=list)
+    blocked: bool = False
+    blocked_reason: str | None = None
+
+
+class FAQGenerationFromSourceConfirmRequest(BaseModel):
+    """Body for POST /api/faqs/generate/confirm (FR-018). Reuses FAQCreate
+    directly — the client resubmits the (possibly edited) approved
+    candidates in full; there is no server-side session to reference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: list[FAQCreate] = Field(min_length=1)
+
+
+class FAQGenerationFromSourceConfirmResponse(BaseModel):
+    """Response for the FR-018 confirm endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    created_faq_ids: list[int]
