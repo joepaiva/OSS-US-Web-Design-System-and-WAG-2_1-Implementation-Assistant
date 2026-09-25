@@ -20,9 +20,9 @@ Schema groups:
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 # ────────────────────────────────────────────────────────────────────────
 # Citation (embedded value object)
@@ -79,6 +79,12 @@ class FAQRead(BaseModel):
     citations: list[Citation]
     created_at: datetime
     updated_at: datetime
+    # v0.2 (FR-016): full multi-select associations. For FAQs created
+    # before v0.2 (no M:N rows), question_category_ids falls back to
+    # [question_category_id] when set, and the other two lists are empty.
+    question_category_ids: list[int] = Field(default_factory=list)
+    source_category_ids: list[int] = Field(default_factory=list)
+    source_ids: list[int] = Field(default_factory=list)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -184,3 +190,337 @@ class QuestionResponse(BaseModel):
     citations: list[Citation]
     # Indicates whether any citations were found (FR-004 AC: no broken links)
     has_citations: bool
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# v0.2 increment — FR-007 through FR-017
+# ═════════════════════════════════════════════════════════════════════════
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Information Source Categories (FR-010, T-002)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class InformationSourceCategoryCreate(BaseModel):
+    """Body for POST /api/information-source-categories/ (FR-010)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None)
+
+
+class InformationSourceCategoryRead(BaseModel):
+    """InformationSourceCategory representation in responses (FR-010)."""
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: int
+    org_id: int
+    name: str
+    description: str | None
+    created_by_user_id: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Information Sources (FR-011..FR-014, T-003)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class SourceTypeInfo(BaseModel):
+    """One entry of GET /api/information-sources/source-types (FR-011)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: str
+    label: str
+    form_variant: str
+
+
+class MCPCredentials(BaseModel):
+    """Optional MCP server credential fields (FR-014)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str | None = None
+    password: str | None = None
+    api_key: str | None = None
+
+
+class LocalCodeRepoSourceCreate(BaseModel):
+    """POST /api/information-sources/ body for a Local Code Repo source (FR-012)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_type: Literal["local_code_repo"]
+    name: str = Field(min_length=1, max_length=255)
+    category_id: int
+    folder_path: str = Field(min_length=1)
+
+
+class DocumentFolderSourceCreate(BaseModel):
+    """POST /api/information-sources/ body for a Document Folder source (FR-012)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_type: Literal["document_folder"]
+    name: str = Field(min_length=1, max_length=255)
+    category_id: int
+    folder_path: str = Field(min_length=1)
+
+
+class GitHubOnlineRepoSourceCreate(BaseModel):
+    """POST /api/information-sources/ body for a GitHub/Online Repo source (FR-013)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_type: Literal["github_online_repo"]
+    name: str = Field(min_length=1, max_length=255)
+    category_id: int
+    github_url: str = Field(min_length=1)
+    access_token: str | None = None
+
+
+class MCPServerSourceCreate(BaseModel):
+    """POST /api/information-sources/ body for an MCP Server source (FR-014)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_type: Literal["mcp_server"]
+    name: str = Field(min_length=1, max_length=255)
+    category_id: int
+    mcp_server_address: str = Field(min_length=1)
+    credentials: MCPCredentials | None = None
+
+
+InformationSourceCreate = Annotated[
+    LocalCodeRepoSourceCreate
+    | DocumentFolderSourceCreate
+    | GitHubOnlineRepoSourceCreate
+    | MCPServerSourceCreate,
+    Field(discriminator="source_type"),
+]
+
+
+class InformationSourceRead(BaseModel):
+    """InformationSource representation in responses (FR-011..FR-014).
+
+    Never carries `credentials_encrypted` or any decrypted secret — only a
+    `credential_set` indicator (SR-001: no plaintext credential is ever
+    returned in API responses).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    org_id: int
+    category_id: int
+    name: str
+    source_type: str
+    folder_path: str | None
+    github_url: str | None
+    mcp_server_address: str | None
+    credential_set: bool
+    test_status: str
+    last_tested_at: datetime | None
+    created_by_user_id: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class InformationSourceCreateResponse(BaseModel):
+    """201 response for POST /api/information-sources/."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: int
+    name: str
+    source_type: str
+    category_id: int
+    status: str
+    message: str
+
+
+class LocalValidateAccessRequest(BaseModel):
+    """Body for POST /api/information-sources/local/validate-access (FR-012)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    folder_path: str = Field(min_length=1)
+
+
+class GitHubVerifyRequest(BaseModel):
+    """Body for POST /api/information-sources/github/verify (FR-013)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    github_url: str = Field(min_length=1)
+    access_token: str | None = None
+
+
+class MCPTestRequest(BaseModel):
+    """Body for POST /api/information-sources/mcp/test (FR-014)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    mcp_server_address: str = Field(min_length=1)
+    credentials: MCPCredentials | None = None
+
+
+class ConnectivityTestResponse(BaseModel):
+    """Shared response shape for the three standalone connectivity-test
+    endpoints (they never persist a row)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["success", "failed"]
+    message: str
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Question Categories — creation (FR-015, T-005)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class QuestionCategoryCreate(BaseModel):
+    """Body for POST /api/question-categories/ (FR-015)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FAQ — manual creation (FR-016, T-006)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class FAQCreate(BaseModel):
+    """Body for POST /api/faqs/ (FR-016).
+
+    All four collections are required and must be non-empty per T-006's
+    acceptance criteria ("at least one question category, at least one
+    source category, at least one source").
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    question: str = Field(min_length=1)
+    answer: str = Field(min_length=1)
+    question_category_ids: list[int] = Field(min_length=1)
+    source_category_ids: list[int] = Field(min_length=1)
+    source_ids: list[int] = Field(min_length=1)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Tiered question answering (FR-007, FR-008, T-015, T-016)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TieredQuestionResponse(BaseModel):
+    """Response for POST /api/questions/ (FR-007, T-015).
+
+    `source` identifies which tier produced the answer.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    interaction_log_id: int
+    response_text: str
+    reasoning: str
+    citations: list[Citation]
+    has_citations: bool
+    source: Literal["faq", "script", "llm"]
+    llm_invoked: bool
+
+
+class AnswerQuestionResponse(BaseModel):
+    """Response for POST /api/questions/answer (FR-008, T-016).
+
+    Either a normal answer (status=None, response_text populated) or an
+    "unanswerable" outcome (status="no_answer_available", alert_sent=True).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    interaction_log_id: int | None
+    question_text: str
+    response_text: str | None
+    reasoning: str | None
+    citations: list[Citation]
+    tier: Literal[
+        "faq", "script", "llm_retrieval_augmented", "llm_frontier", "unanswerable"
+    ]
+    status: str | None = None
+    message: str | None = None
+    alert_sent: bool = False
+
+
+class QuestionAlertRead(BaseModel):
+    """Alert representation for GET /api/questions/alerts (FR-008)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    org_id: int
+    alert_type: str
+    question_text: str
+    submitting_user_name: str
+    acknowledged: bool
+    acknowledged_at: datetime | None
+    created_at: datetime
+
+
+# ────────────────────────────────────────────────────────────────────────
+# LLM Fallback Configuration (FR-009, T-017)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class LLMFallbackConfigUpsert(BaseModel):
+    """Body for PUT /api/llm-fallback-config/{source_category_id}/{question_category_id}."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["retrieval_augmented", "frontier_general_knowledge"]
+
+
+class LLMFallbackConfigRead(BaseModel):
+    """LLMFallbackConfig representation in responses (FR-009)."""
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: int
+    org_id: int
+    source_category_id: int
+    question_category_id: int
+    mode: str
+    created_at: datetime
+    updated_at: datetime
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Content Manager role assignment (supporting infrastructure for
+# FR-011..FR-014, FR-016 — see app/slots/accessibility_assistant/__init__.py)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class ContentManagerAssignRequest(BaseModel):
+    """Body for POST /api/organizations/content-managers (assign)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
+
+
+class ContentManagerAssignResponse(BaseModel):
+    """Response confirming a Content Manager designation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
+    org_id: int
+    role: str

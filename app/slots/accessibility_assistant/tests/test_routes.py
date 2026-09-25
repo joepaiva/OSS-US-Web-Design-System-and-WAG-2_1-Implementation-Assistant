@@ -24,7 +24,6 @@ from typing import cast
 import pytest
 from httpx import AsyncClient
 
-
 # ────────────────────────────────────────────────────────────────────────
 # FR-003: Browse question categories
 # ────────────────────────────────────────────────────────────────────────

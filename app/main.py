@@ -33,9 +33,31 @@ from app.health.routes import router as health_router
 from app.logging import configure_logging, get_logger
 from app.notifications.routes import router as notifications_router
 from app.orgs.routes import router as orgs_router
+from app.slots.accessibility_assistant.routes import (
+    faq_router as accessibility_assistant_faq_router,
+)
+from app.slots.accessibility_assistant.routes import (
+    information_source_category_router as accessibility_assistant_information_source_category_router,
+)
+from app.slots.accessibility_assistant.routes import (
+    information_source_router as accessibility_assistant_information_source_router,
+)
+from app.slots.accessibility_assistant.routes import (
+    llm_fallback_config_router as accessibility_assistant_llm_fallback_config_router,
+)
+from app.slots.accessibility_assistant.routes import (
+    organization_role_router as accessibility_assistant_organization_role_router,
+)
+from app.slots.accessibility_assistant.routes import (
+    question_category_router as accessibility_assistant_question_category_router,
+)
+from app.slots.accessibility_assistant.routes import (
+    question_router as accessibility_assistant_question_router,
+)
 
 # ─── CHASSIS-EXTENSION-POINT: slot-routers (imports) ───────────────────
 from app.slots.accessibility_assistant.routes import router as accessibility_assistant_router
+
 # LLM-generated slots register their imports here.
 from app.slots.example.routes import router as example_router
 from app.slots.example_with_states.routes import (
@@ -172,6 +194,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ─── CHASSIS-EXTENSION-POINT: slot-routers (registration) ─────────
     app.include_router(accessibility_assistant_router)
+    # v0.2 (T-002, T-003, T-005, T-006, T-015, T-016, T-017) — additional
+    # resource-domain routers for this same slot, mirrored under /api/...
+    # per DESIGN.md's traceability matrix.
+    app.include_router(accessibility_assistant_information_source_category_router)
+    app.include_router(accessibility_assistant_information_source_router)
+    app.include_router(accessibility_assistant_question_category_router)
+    app.include_router(accessibility_assistant_faq_router)
+    app.include_router(accessibility_assistant_question_router)
+    app.include_router(accessibility_assistant_llm_fallback_config_router)
+    app.include_router(accessibility_assistant_organization_role_router)
     # LLM-generated slots register here. One include_router call per slot.
     app.include_router(example_router)
     app.include_router(example_with_states_router)
