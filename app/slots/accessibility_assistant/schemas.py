@@ -376,13 +376,29 @@ class MCPTestRequest(BaseModel):
 
 
 class ConnectivityTestResponse(BaseModel):
-    """Shared response shape for the three standalone connectivity-test
+    """Shared response shape for the standalone connectivity-test
     endpoints (they never persist a row)."""
 
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["success", "failed"]
     message: str
+
+
+class TestConnectivityWithRetryRequest(BaseModel):
+    """Body for POST /api/information-sources/test-connectivity (CON-005,
+    CON-006). Unlike /github/verify and /mcp/test (single attempt, no
+    alerting — unchanged from v0.2), this endpoint implements the full
+    retry-with-backoff + failure-type-specific messaging + admin-alerting
+    contract DESIGN.md specifies for this route."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    type: Literal["github_online_repo", "mcp_server"]
+    github_url: str | None = None
+    access_token: str | None = None
+    mcp_server_address: str | None = None
+    credentials: MCPCredentials | None = None
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -446,8 +462,11 @@ class TieredQuestionResponse(BaseModel):
 class AnswerQuestionResponse(BaseModel):
     """Response for POST /api/questions/answer (FR-008, T-016).
 
-    Either a normal answer (status=None, response_text populated) or an
-    "unanswerable" outcome (status="no_answer_available", alert_sent=True).
+    Either a normal answer (status=None, response_text populated), FR-008's
+    generic "unanswerable" outcome (status="no_answer_available",
+    alert_sent=True), or CON-004's LLM-unavailability outcome
+    (status="llm_unavailable", faq_browse_only=True, message specific to
+    the failure type — rate limit / authentication / timeout).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -463,6 +482,9 @@ class AnswerQuestionResponse(BaseModel):
     status: str | None = None
     message: str | None = None
     alert_sent: bool = False
+    # CON-004: True when the LLM tier degraded due to External-LLM-API
+    # unavailability — FAQ browse-only mode remains available to the user.
+    faq_browse_only: bool = False
 
 
 class QuestionAlertRead(BaseModel):

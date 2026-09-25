@@ -85,6 +85,7 @@ from app.slots.accessibility_assistant.schemas import (
     RateInteractionUpdate,
     ShareResourceRequest,
     SourceTypeInfo,
+    TestConnectivityWithRetryRequest,
     TieredQuestionResponse,
 )
 from app.slots.accessibility_assistant.service import (
@@ -94,13 +95,16 @@ from app.slots.accessibility_assistant.service import (
     FAQGenerationSessionNotFound,
     FAQNotFound,
     FAQValidationError,
+    GitHubIntegrationError,
     InformationSourceCategoryNotFound,
     InformationSourceNotFound,
     InteractionLogAccessDenied,
     InteractionLogNotFound,
     LLMFallbackConfigNotFound,
+    MCPIntegrationError,
     NotAnOrgMember,
     PlatformShareDenied,
+    PlatformShareIneligible,
     QuestionAlertNotFound,
     RatingAlreadySubmitted,
     SourceTestFailed,
@@ -138,6 +142,7 @@ from app.slots.accessibility_assistant.service import (
     share_information_source_category,
     submit_helpfulness_rating,
     test_github_access,
+    test_information_source_connectivity,
     test_local_folder_access,
     test_mcp_connectivity,
     to_faq_read,
@@ -604,6 +609,50 @@ async def test_mcp_route(
     )
 
 
+@information_source_router.post(
+    "/test-connectivity",
+    response_model=ConnectivityTestResponse,
+    dependencies=[Depends(requires(ASSISTANT_SOURCE_MANAGE))],
+    summary=(
+        "Retry-with-alerting connectivity test for GitHub/MCP (CON-005, CON-006)"
+    ),
+)
+async def test_information_source_connectivity_route(
+    payload: TestConnectivityWithRetryRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+    session: SessionDep,
+) -> ConnectivityTestResponse:
+    """Unlike /github/verify and /mcp/test above (a single attempt, no
+    alerting — unchanged from v0.2), this endpoint implements CON-005's and
+    CON-006's full retry-with-backoff + failure-type-specific messaging +
+    admin-alerting contract. Never persists a row (DESIGN.md's
+    test-connectivity contract, §7 "Information Source Configuration")."""
+    try:
+        await test_information_source_connectivity(
+            session,
+            org.id,
+            payload.type,
+            payload.github_url,
+            payload.access_token,
+            payload.mcp_server_address,
+            payload.credentials,
+        )
+    except GitHubIntegrationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.user_message
+        ) from exc
+    except MCPIntegrationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.user_message
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return ConnectivityTestResponse(status="success", message="Connectivity test passed.")
+
+
 @information_source_router.get(
     "/",
     response_model=list[InformationSourceRead],
@@ -743,6 +792,25 @@ async def answer_question_route(
         ) from exc
 
     if result["tier"] == "unanswerable":
+        # CON-004: the LLM tier failed with one of the three named
+        # External-LLM-API failure types (rate limit / authentication /
+        # timeout) — distinct from FR-008's generic "nothing matched"
+        # outcome below. The admin alert (Organization Administrator +
+        # Platform Administrator) was already dispatched inside the
+        # service layer's retry helper.
+        if result.get("llm_failure_type") is not None:
+            return AnswerQuestionResponse(
+                interaction_log_id=result["interaction_log_id"],
+                question_text=payload.question_text,
+                response_text=None,
+                reasoning=None,
+                citations=[],
+                tier="unanswerable",
+                status="llm_unavailable",
+                message=result["llm_failure_message"],
+                alert_sent=result["alert_sent"],
+                faq_browse_only=True,
+            )
         return AnswerQuestionResponse(
             interaction_log_id=result["interaction_log_id"],
             question_text=payload.question_text,
@@ -1032,6 +1100,14 @@ async def share_information_source_category_route(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="only a Platform Administrator may share this resource",
         ) from exc
+    except PlatformShareIneligible as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "this resource was not created by a Platform Administrator and "
+                "is not eligible for platform-level sharing"
+            ),
+        ) from exc
     except InformationSourceCategoryNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1060,6 +1136,14 @@ async def share_information_source_route(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="only a Platform Administrator may share this resource",
         ) from exc
+    except PlatformShareIneligible as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "this resource was not created by a Platform Administrator and "
+                "is not eligible for platform-level sharing"
+            ),
+        ) from exc
     except InformationSourceNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="information source not found"
@@ -1086,6 +1170,14 @@ async def share_faq_route(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="only a Platform Administrator may share this resource",
+        ) from exc
+    except PlatformShareIneligible as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "this resource was not created by a Platform Administrator and "
+                "is not eligible for platform-level sharing"
+            ),
         ) from exc
     except FAQNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="FAQ not found") from exc

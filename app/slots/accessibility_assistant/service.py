@@ -27,6 +27,8 @@ Key design decisions:
 
 from __future__ import annotations
 
+import asyncio
+import enum
 import json
 import os
 import re
@@ -121,6 +123,23 @@ SOURCE_TYPES: list[dict[str, str]] = [
     },
 ]
 
+# FR-027: the two possible values of `creator_role_snapshot`, recorded once
+# at creation and never updated. "platform_admin" is the only value that
+# makes a resource eligible for platform-level sharing (see
+# _share_resource); NULL (a row that predates this column, or was inserted
+# directly via ORM bypassing the service layer) is treated the same as
+# "other" — never eligible — a safe, fail-closed default.
+_CREATOR_ROLE_PLATFORM_ADMIN = "platform_admin"
+_CREATOR_ROLE_OTHER = "other"
+
+
+def _creator_role_snapshot_for(user: User) -> str:
+    """FR-027: snapshot the creator's role AT CREATION TIME. A subsequent
+    role change (promotion or demotion) never retroactively alters an
+    already-created resource's eligibility — that is the entire point of a
+    snapshot rather than a live lookup."""
+    return _CREATOR_ROLE_PLATFORM_ADMIN if user.is_superuser else _CREATOR_ROLE_OTHER
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Custom exceptions
@@ -213,6 +232,16 @@ class PlatformShareDenied(Exception):
     """Raised when a non-Platform-Administrator (user.is_superuser is
     False) attempts to designate a resource platform-level shared
     (FR-020)."""
+
+
+class PlatformShareIneligible(Exception):
+    """Raised when a genuine Platform Administrator attempts to designate a
+    resource platform-level shared, but the resource's `creator_role_snapshot`
+    is not "platform_admin" (FR-027) — i.e. the resource was originally
+    created by someone other than a Platform Administrator (or predates the
+    snapshot column, which fails closed the same way). Distinct from
+    PlatformShareDenied, which is about who the ACTOR is; this is about who
+    the CREATOR was."""
 
 
 class FAQGenerationSessionNotFound(Exception):
@@ -639,10 +668,14 @@ async def _call_llm(
         messages.extend(history)
         messages.append({"role": "user", "content": question})
 
+        # NFR-002: resolve whichever provider is actually configured for
+        # this org rather than hardcoding one — see
+        # _resolve_configured_provider's docstring.
+        provider = await _resolve_configured_provider(session, org_id)
         result = await complete(
             session=session,
-            provider="openai",
-            model="gpt-4o-mini",
+            provider=provider,
+            model=_model_for_provider(provider),
             messages=messages,
             org_id=org_id,
         )
@@ -959,7 +992,10 @@ async def create_information_source_category(
         raise DuplicateCategoryName(name)
 
     category = InformationSourceCategory(
-        name=name, description=description, created_by_user_id=user.id
+        name=name,
+        description=description,
+        created_by_user_id=user.id,
+        creator_role_snapshot=_creator_role_snapshot_for(user),
     )
     session.add(category)
     await session.flush()
@@ -1083,6 +1119,260 @@ async def _run_connectivity_test(payload: InformationSourceCreate) -> bool:
     return test_local_folder_access(payload.folder_path)
 
 
+# ────────────────────────────────────────────────────────────────────────
+# GitHub / Online Repository retry-exhaustion alerts (CON-005, T-CON-005)
+# ────────────────────────────────────────────────────────────────────────
+#
+# Distinct from test_github_access above: that function is a SINGLE-attempt
+# probe used by the pre-existing /github/verify endpoint and the
+# create-source flow (both unchanged — see conftest.py's monkeypatch
+# comments on why their exact signature/call sites must not change). This
+# section implements CON-005's own, separate retry-with-backoff +
+# failure-type-specific messaging + admin-alerting contract, exposed via
+# the NEW POST /information-sources/test-connectivity endpoint DESIGN.md
+# specifies (§7, "Information Source Configuration").
+
+
+class GitHubFailureType(enum.StrEnum):
+    """CON-005's two named GitHub/Online-Repository failure types (exact
+    wire strings, per the acceptance criteria)."""
+
+    SERVICE_TIMEOUT = "service timeout"
+    AUTHENTICATION_FAILURE = "authentication failure"
+
+
+class GitHubIntegrationError(Exception):
+    """CON-005: terminal GitHub/Online-Repository integration failure after
+    the retry budget is exhausted (or an immediate authentication
+    rejection). `.user_message` is safe to show the requesting user — no
+    credential material, stack trace, or internal URL."""
+
+    def __init__(self, failure_type: GitHubFailureType, message: str) -> None:
+        super().__init__(message)
+        self.failure_type = failure_type
+        self.user_message = message
+
+
+class _GitHubURLInvalid(Exception):
+    """Not a recognizable GitHub repo URL — a client input problem, not a
+    transient integration failure. Not retried (a malformed URL can never
+    succeed on a later attempt)."""
+
+
+_GITHUB_MAX_ATTEMPTS = 3
+_GITHUB_RETRY_DELAYS: tuple[float, ...] = (1.0, 3.0)
+_GITHUB_ATTEMPT_TIMEOUT_SECONDS = 20.0
+
+_GITHUB_FAILURE_USER_MESSAGES: dict[GitHubFailureType, str] = {
+    GitHubFailureType.SERVICE_TIMEOUT: (
+        "We couldn't reach the GitHub repository in time. Please try again later."
+    ),
+    GitHubFailureType.AUTHENTICATION_FAILURE: (
+        "We couldn't authenticate with the GitHub repository. Please check the "
+        "access token and try again."
+    ),
+}
+
+
+async def _github_attempt(
+    github_url: str, access_token: str | None, timeout_seconds: float
+) -> None:
+    """One read-only attempt against the GitHub REST API. Raises
+    _GitHubURLInvalid, httpx.HTTPStatusError, or httpx.HTTPError; returns
+    None on success."""
+    api_url = _github_api_url(github_url)
+    if api_url is None:
+        raise _GitHubURLInvalid(github_url)
+    headers = {"Authorization": f"token {access_token}"} if access_token else {}
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        resp = await client.get(api_url, headers=headers)
+    resp.raise_for_status()
+
+
+async def verify_github_access_with_retry(
+    session: AsyncSession, org_id: int, github_url: str, access_token: str | None
+) -> None:
+    """CON-005: test read access to a GitHub/online repo with up to
+    `_GITHUB_MAX_ATTEMPTS` attempts (1s delay before the 2nd, 3s before any
+    subsequent), a `_GITHUB_ATTEMPT_TIMEOUT_SECONDS` per-attempt timeout,
+    and failure-type-specific admin alerting on terminal failure. Returns
+    None on success. Raises GitHubIntegrationError on terminal failure — an
+    authentication failure (401/403) is immediately terminal on ANY
+    attempt; a malformed URL is likewise immediately terminal (never
+    classified as an authentication failure, since none occurred)."""
+    last_failure_type = GitHubFailureType.SERVICE_TIMEOUT
+    for attempt in range(1, _GITHUB_MAX_ATTEMPTS + 1):
+        try:
+            await asyncio.wait_for(
+                _github_attempt(github_url, access_token, _GITHUB_ATTEMPT_TIMEOUT_SECONDS),
+                timeout=_GITHUB_ATTEMPT_TIMEOUT_SECONDS,
+            )
+            return
+        except _GitHubURLInvalid:
+            last_failure_type = GitHubFailureType.SERVICE_TIMEOUT
+            break
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403):
+                last_failure_type = GitHubFailureType.AUTHENTICATION_FAILURE
+                break
+            last_failure_type = GitHubFailureType.SERVICE_TIMEOUT
+        except (TimeoutError, httpx.HTTPError):
+            last_failure_type = GitHubFailureType.SERVICE_TIMEOUT
+
+        if attempt < _GITHUB_MAX_ATTEMPTS:
+            await asyncio.sleep(_GITHUB_RETRY_DELAYS[attempt - 1])
+
+    message = _GITHUB_FAILURE_USER_MESSAGES[last_failure_type]
+    await _dispatch_admin_alert(
+        session,
+        org_id,
+        title="GitHub / Online Repository integration failed",
+        body=f"The GitHub/Online Repository integration failed ({last_failure_type.value}).",
+    )
+    raise GitHubIntegrationError(last_failure_type, message)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# MCP Server integration failure handling and alerting (CON-006, T-0XX)
+# ────────────────────────────────────────────────────────────────────────
+#
+# Distinct from test_mcp_connectivity above (single-attempt probe, unchanged
+# — see the same conftest.py note as the GitHub section above). Implements
+# CON-006's own retry-with-backoff + failure-type-specific messaging +
+# admin-alerting contract via the same new test-connectivity endpoint.
+
+
+class MCPFailureType(enum.StrEnum):
+    """CON-006's two named MCP Server failure types (exact wire strings)."""
+
+    SERVICE_TIMEOUT = "service timeout"
+    AUTHENTICATION_FAILURE = "authentication failure"
+
+
+class MCPIntegrationError(Exception):
+    """CON-006: terminal MCP Server integration failure after the retry
+    budget is exhausted (or an immediate authentication rejection).
+    `.user_message` is safe to show the requesting user."""
+
+    def __init__(self, failure_type: MCPFailureType, message: str) -> None:
+        super().__init__(message)
+        self.failure_type = failure_type
+        self.user_message = message
+
+
+_MCP_MAX_ATTEMPTS = 3
+_MCP_RETRY_DELAYS: tuple[float, ...] = (1.0, 3.0)
+_MCP_ATTEMPT_TIMEOUT_SECONDS = 20.0
+
+_MCP_FAILURE_USER_MESSAGES: dict[MCPFailureType, str] = {
+    MCPFailureType.SERVICE_TIMEOUT: (
+        "We couldn't reach the MCP server in time. Please try again later."
+    ),
+    MCPFailureType.AUTHENTICATION_FAILURE: (
+        "We couldn't authenticate with the MCP server. Please check the "
+        "credentials and try again."
+    ),
+}
+
+# The chassis's own app.mcp.client.MCPClientError collapses every
+# transport/protocol failure into ONE exception carrying only str(exc) — no
+# status code or typed cause survives (see that module's own docstring).
+# This is a best-effort text-based classification given that information
+# loss; a more precise classification would require a chassis-level change
+# to app/mcp/client.py, which is outside this slot's editable surface.
+_MCP_AUTH_FAILURE_MARKERS = ("401", "403", "unauthorized", "forbidden", "authentication")
+
+
+def _classify_mcp_error(exc: Exception) -> MCPFailureType:
+    """Best-effort classification (CON-006) — see the module note above."""
+    text = str(exc).lower()
+    if any(marker in text for marker in _MCP_AUTH_FAILURE_MARKERS):
+        return MCPFailureType.AUTHENTICATION_FAILURE
+    return MCPFailureType.SERVICE_TIMEOUT
+
+
+async def verify_mcp_connectivity_with_retry(
+    session: AsyncSession,
+    org_id: int,
+    mcp_server_address: str,
+    credentials: MCPCredentials | None,
+) -> None:
+    """CON-006: connect to an MCP server with up to `_MCP_MAX_ATTEMPTS`
+    attempts (1s delay before the 2nd, 3s before any subsequent), a
+    `_MCP_ATTEMPT_TIMEOUT_SECONDS` per-attempt timeout, and failure-type-
+    specific admin alerting on terminal failure. Returns None on success.
+    Raises MCPIntegrationError on terminal failure. An authentication
+    failure is immediately terminal on ANY attempt (see _classify_mcp_error
+    for how it's detected given the chassis client's error surface)."""
+    from app.mcp.client import MCPClientError  # noqa: PLC0415
+    from app.mcp.client import list_tools as _mcp_list_tools  # noqa: PLC0415
+
+    credential = None
+    if credentials is not None:
+        credential = credentials.api_key or credentials.password
+
+    last_failure_type = MCPFailureType.SERVICE_TIMEOUT
+    for attempt in range(1, _MCP_MAX_ATTEMPTS + 1):
+        try:
+            await asyncio.wait_for(
+                _mcp_list_tools(
+                    url=mcp_server_address,
+                    credential=credential,
+                    timeout_seconds=_MCP_ATTEMPT_TIMEOUT_SECONDS,
+                ),
+                timeout=_MCP_ATTEMPT_TIMEOUT_SECONDS,
+            )
+            return
+        except TimeoutError:
+            last_failure_type = MCPFailureType.SERVICE_TIMEOUT
+        except MCPClientError as exc:
+            last_failure_type = _classify_mcp_error(exc)
+            if last_failure_type == MCPFailureType.AUTHENTICATION_FAILURE:
+                break
+
+        if attempt < _MCP_MAX_ATTEMPTS:
+            await asyncio.sleep(_MCP_RETRY_DELAYS[attempt - 1])
+
+    message = _MCP_FAILURE_USER_MESSAGES[last_failure_type]
+    await _dispatch_admin_alert(
+        session,
+        org_id,
+        title="MCP Server integration failed",
+        body=f"The MCP Server integration failed ({last_failure_type.value}).",
+    )
+    raise MCPIntegrationError(last_failure_type, message)
+
+
+async def test_information_source_connectivity(
+    session: AsyncSession,
+    org_id: int,
+    source_type: str,
+    github_url: str | None,
+    access_token: str | None,
+    mcp_server_address: str | None,
+    credentials: MCPCredentials | None,
+) -> None:
+    """DESIGN.md's `POST /information-sources/test-connectivity` (CON-005,
+    CON-006): retry-with-alerting connectivity check for a GitHub/Online
+    Repo or MCP Server, without persisting anything. Returns None on
+    success. Raises GitHubIntegrationError / MCPIntegrationError on
+    terminal failure, or ValueError if a required field for `source_type`
+    is missing."""
+    if source_type == InformationSourceType.GITHUB_ONLINE_REPO.value:
+        if not github_url:
+            raise ValueError("github_url is required for github_online_repo")
+        await verify_github_access_with_retry(session, org_id, github_url, access_token)
+        return
+    if source_type == InformationSourceType.MCP_SERVER.value:
+        if not mcp_server_address:
+            raise ValueError("mcp_server_address is required for mcp_server")
+        await verify_mcp_connectivity_with_retry(
+            session, org_id, mcp_server_address, credentials
+        )
+        return
+    raise ValueError(f"unsupported source_type for connectivity test: {source_type!r}")
+
+
 @audited(
     "assistant.information_source_created",
     entity_type="information_source",
@@ -1139,6 +1429,7 @@ async def create_information_source(
         test_status=InformationSourceTestStatus.SUCCESS.value,
         last_tested_at=datetime.now(UTC),
         created_by_user_id=user.id,
+        creator_role_snapshot=_creator_role_snapshot_for(user),
     )
     session.add(source)
     await session.flush()
@@ -1263,6 +1554,7 @@ async def create_faq(session: AsyncSession, user: User, payload: FAQCreate) -> F
         question=payload.question,
         answer=payload.answer,
         created_by_user_id=user.id,
+        creator_role_snapshot=_creator_role_snapshot_for(user),
     )
     session.add(faq)
     await session.flush()
@@ -1420,8 +1712,17 @@ async def resolve_question_tiered(
     fallback (mode selected via LLMFallbackConfig) -> unanswerable.
 
     Returns a dict with keys: tier, response_text, reasoning, citations,
-    llm_invoked, alert_sent, interaction_log_id. Always persists an
-    InteractionLog row (FR-006) regardless of which tier resolved it.
+    llm_invoked, alert_sent, interaction_log_id, llm_failure_type,
+    llm_failure_message. Always persists an InteractionLog row (FR-006)
+    regardless of which tier resolved it.
+
+    `llm_failure_type`/`llm_failure_message` (CON-004) are non-None only
+    when the LLM tier failed with one of CON-004's three named
+    External-LLM-API failure modes (see `_call_llm_api_with_retry`); the
+    CON-004 admin alert (Organization Administrator + Platform
+    Administrator) is dispatched from within that retry helper regardless
+    of `dispatch_alert_on_unanswerable` — that flag governs FR-008's own,
+    separate org-admin/content-manager "unanswerable question" alert only.
     """
     _check_content(question_text)
     await _ensure_baseline_role_grants(session)
@@ -1436,6 +1737,7 @@ async def resolve_question_tiered(
     citations: list[Citation] = []
     llm_invoked = False
     alert_sent = False
+    llm_failure_type: LLMFailureType | None = None
 
     # Tier 1: deterministic FAQ match (FR-007).
     match = await _faq_match_tiered(session, question_text)
@@ -1462,9 +1764,10 @@ async def resolve_question_tiered(
                 mode=mode,
             )
             tier = "llm_retrieval_augmented" if mode == "retrieval_augmented" else "llm_frontier"
-        except _UnanswerableError:
+        except _UnanswerableError as exc:
             tier = "unanswerable"
             llm_invoked = False
+            llm_failure_type = exc.llm_failure_type
 
     if tier == "unanswerable" and dispatch_alert_on_unanswerable:
         await dispatch_unanswerable_alert(session, org_id, user, question_text)
@@ -1491,12 +1794,58 @@ async def resolve_question_tiered(
         "llm_invoked": llm_invoked,
         "alert_sent": alert_sent,
         "interaction_log_id": log_entry.id,
+        "llm_failure_type": llm_failure_type.value if llm_failure_type else None,
+        "llm_failure_message": (
+            _LLM_FAILURE_USER_MESSAGES[llm_failure_type] if llm_failure_type else None
+        ),
     }
+
+
+class LLMFailureType(enum.StrEnum):
+    """CON-004's three named External-LLM-API failure types. Values are the
+    EXACT wire strings the acceptance criteria require in alert bodies
+    (e.g. 'rate limit exceeded'), not Python-identifier-style names."""
+
+    RATE_LIMIT_EXCEEDED = "rate limit exceeded"
+    AUTHENTICATION_FAILURE = "authentication failure"
+    SERVICE_TIMEOUT = "service timeout"
+
+
+_LLM_FAILURE_USER_MESSAGES: dict[LLMFailureType, str] = {
+    LLMFailureType.RATE_LIMIT_EXCEEDED: (
+        "The AI assistant is temporarily unavailable due to rate limiting. "
+        "You can still browse the FAQ categories."
+    ),
+    LLMFailureType.AUTHENTICATION_FAILURE: (
+        "The AI assistant has a configuration issue and is temporarily "
+        "unavailable. You can still browse the FAQ categories."
+    ),
+    LLMFailureType.SERVICE_TIMEOUT: (
+        "The AI assistant is temporarily unavailable. You can still browse "
+        "the FAQ categories."
+    ),
+}
 
 
 class _UnanswerableError(Exception):
     """Internal signal: the LLM fallback tier could not produce a sufficient
-    response (LLM unavailable or a transport failure)."""
+    response (LLM unavailable or a transport failure).
+
+    `llm_failure_type` (CON-004) is set only when the failure is one of the
+    three named External-LLM-API failure modes discovered by
+    `_call_llm_api_with_retry`'s retry loop (rate limit / authentication /
+    timeout). It is None for every other "unanswerable" cause — no LLM key
+    configured at all (the External LLM API was never reached, so none of
+    CON-004's three types describe it), or an SR-006 sanitizer block. Those
+    remain FR-008's pre-existing generic "no answer available" outcome,
+    unchanged by CON-004.
+    """
+
+    def __init__(
+        self, message: str, *, llm_failure_type: LLMFailureType | None = None
+    ) -> None:
+        super().__init__(message)
+        self.llm_failure_type = llm_failure_type
 
 
 async def _resolve_llm_fallback_mode(
@@ -1527,6 +1876,262 @@ async def _resolve_llm_fallback_mode(
     return config.mode
 
 
+# ────────────────────────────────────────────────────────────────────────
+# LLM provider resolution (NFR-002, CON-001, T-NFR-002)
+# ────────────────────────────────────────────────────────────────────────
+#
+# NFR-002 requires LLM provider selection to be entirely the Platform
+# Administrator's discretion via the chassis API configuration UI, with NO
+# application-layer constraint on which provider is used. A hardcoded
+# literal provider string (e.g. "openai") passed to `complete(provider=
+# ...)` IS such a constraint: `app.llm.service.resolve_api_key` looks up an
+# ACTIVE `LLMProviderKey` row for the EXACT provider string given, so a
+# hardcoded "openai" call would raise LLMKeyUnavailable forever once an
+# admin configures a DIFFERENT provider (e.g. "anthropic") — even though a
+# perfectly valid key exists. This was a real, live NFR-002/CON-001 defect
+# discovered verifying this increment (both `_call_llm` and the prior body
+# of `_call_llm_tiered` hardcoded "openai"/"gpt-4o-mini") and is fixed here.
+_DEFAULT_LLM_PROVIDER = "openai"
+_PROVIDER_DEFAULT_MODEL: dict[str, str] = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-5-haiku-20241022",
+    "gemini": "gemini-1.5-flash",
+    "google": "gemini-1.5-flash",
+}
+
+
+async def _resolve_configured_provider(session: AsyncSession, org_id: int) -> str:
+    """Return whichever LLM provider is actually active/configured for this
+    org (NFR-002): the org's own active key's provider first, else the
+    platform-shared key's provider if the org's access policy allows
+    fallback (mirroring `app.llm.service.resolve_api_key`'s own resolution
+    order), else `_DEFAULT_LLM_PROVIDER`.
+
+    Falling back to a default when NOTHING is configured is not itself a
+    constraint on provider choice: the real `complete()` call will raise
+    LLMKeyUnavailable regardless of which provider string reaches it when
+    no key resolves for ANY provider, so the fallback value is never
+    load-bearing for a genuinely unconfigured org. It also keeps every
+    existing test that fully replaces `app.llm.service.complete` (and so
+    never exercises key resolution at all) passing unchanged.
+    """
+    from app.llm.models import LLMProviderKey  # noqa: PLC0415
+    from app.llm.service import org_allows_shared  # noqa: PLC0415
+
+    result = await session.execute(
+        select(LLMProviderKey.provider)
+        .where(
+            LLMProviderKey.organization_id == org_id,
+            LLMProviderKey.is_active.is_(True),
+        )
+        .order_by(LLMProviderKey.id.desc())
+        .limit(1)
+    )
+    provider = result.scalar_one_or_none()
+    if provider:
+        return str(provider)
+
+    if await org_allows_shared(session, org_id):
+        shared_result = await session.execute(
+            select(LLMProviderKey.provider)
+            .where(
+                LLMProviderKey.organization_id.is_(None),
+                LLMProviderKey.is_active.is_(True),
+            )
+            .order_by(LLMProviderKey.id.desc())
+            .limit(1)
+        )
+        provider = shared_result.scalar_one_or_none()
+        if provider:
+            return str(provider)
+
+    return _DEFAULT_LLM_PROVIDER
+
+
+def _model_for_provider(provider: str) -> str:
+    """Best-effort default completion model for a resolved provider
+    (NFR-002). The chassis's admin configuration UI captures provider + API
+    key only, not a model name, so this small mapping is this slot's own
+    choice of a reasonable default model per provider family."""
+    return _PROVIDER_DEFAULT_MODEL.get(provider, provider)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# LLM unavailability graceful degradation + alerting (CON-004, T-0XX)
+# ────────────────────────────────────────────────────────────────────────
+
+# Attempt/backoff policy. Module-level (not a constant tuple literal inline)
+# so tests can monkeypatch them to avoid real sleeps in the retry-exhaustion
+# path. Matches CON-005/CON-006's own stated schedule for consistency, since
+# CON-004's own text does not restate inter-attempt delay timing.
+_LLM_MAX_ATTEMPTS = 3
+_LLM_RETRY_DELAYS: tuple[float, ...] = (1.0, 3.0)
+_LLM_ATTEMPT_TIMEOUT_SECONDS = 20.0
+
+
+def _classify_llm_error(exc: Exception) -> LLMFailureType:
+    """Classify a raised `app.llm.transport.LLMError` (or a raw
+    `TimeoutError` from this module's own `asyncio.wait_for` wrapper) into
+    one of CON-004's three named failure types. `LLMError`'s own
+    `__cause__` is the original httpx exception (see transport.py:
+    `raise LLMError(...) from exc`), which is the only place status-code
+    detail survives once it reaches this slot."""
+    if isinstance(exc, TimeoutError):
+        return LLMFailureType.SERVICE_TIMEOUT
+    cause = exc.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        status_code = cause.response.status_code
+        if status_code == 429:
+            return LLMFailureType.RATE_LIMIT_EXCEEDED
+        if status_code in (401, 403):
+            return LLMFailureType.AUTHENTICATION_FAILURE
+    if isinstance(cause, httpx.TimeoutException):
+        return LLMFailureType.SERVICE_TIMEOUT
+    # Any other transport failure (network unreachable, a non-timeout 5xx,
+    # etc.) is bucketed as a service-timeout-shaped unavailability — neither
+    # of CON-004's other two named types describes it, and "temporarily
+    # unavailable" is the honest characterization for the end user.
+    return LLMFailureType.SERVICE_TIMEOUT
+
+
+async def _resolve_org_and_platform_admins(session: AsyncSession, org_id: int) -> list[User]:
+    """Every user holding the per-org 'admin' role in `org_id` (Organization
+    Administrator) PLUS every `is_superuser` user platform-wide (Platform
+    Administrator) — the exact recipient set CON-004/CON-005/CON-006 each
+    specify. De-duplicated by user id."""
+    org_admins_result = await session.execute(
+        select(User)
+        .join(Membership, Membership.user_id == User.id)
+        .join(Role, Role.id == Membership.role_id)
+        .where(Membership.org_id == org_id, Role.name == "admin")
+    )
+    recipients: dict[int, User] = {u.id: u for u in org_admins_result.scalars().all()}
+
+    saved_org_id = get_current_org_id()
+    set_current_org_id(None)
+    try:
+        platform_admins_result = await session.execute(
+            select(User).where(User.is_superuser.is_(True))
+        )
+    finally:
+        set_current_org_id(saved_org_id)
+    for u in platform_admins_result.scalars().all():
+        recipients[u.id] = u
+    return list(recipients.values())
+
+
+async def _dispatch_admin_alert(
+    session: AsyncSession, org_id: int, *, title: str, body: str, level: str = "error"
+) -> None:
+    """Notify every Organization Administrator + Platform Administrator via
+    the chassis notifications subsystem (CON-004/CON-005/CON-006) — the
+    same `app.notifications.service.notify()` entry point
+    `_record_no_execute_violation` (FR-022) already uses, so alerts appear
+    in the recipient's unread notification count. One failed notification
+    never blocks the others.
+
+    Commits immediately after dispatch. This is deliberate: CON-005/CON-006
+    callers raise an exception right after calling this (the connectivity
+    failure surfaces as an HTTP error), and the chassis's per-request
+    session ROLLS BACK on any exception (app/db.py's get_session) — without
+    an explicit commit here, the alert rows would be created, then silently
+    discarded by that rollback, and the requirement's "an in-app alert is
+    dispatched" would be false despite this function appearing to run
+    successfully. A real, live bug found and fixed verifying this
+    increment's CON-005/CON-006 tests. Safe for CON-004's caller too: no
+    other pending writes exist at this point in that flow either.
+    """
+    from app.notifications.service import notify  # noqa: PLC0415
+
+    recipients = await _resolve_org_and_platform_admins(session, org_id)
+    for recipient in recipients:
+        try:
+            await notify(
+                session=session,
+                user_id=recipient.id,
+                title=title,
+                body=body,
+                level=level,
+                org_id=org_id,
+            )
+        except Exception:  # pragma: no cover - notification failure must not break the flow
+            log.error("assistant.admin_alert_failed", recipient_id=recipient.id)
+    await session.commit()
+
+
+async def _call_llm_api_with_retry(
+    session: AsyncSession,
+    provider: str,
+    model: str,
+    messages: list[dict[str, str]],
+    org_id: int,
+) -> dict[str, Any]:
+    """CON-004: call the chassis LLM egress with up to `_LLM_MAX_ATTEMPTS`
+    attempts, a `_LLM_ATTEMPT_TIMEOUT_SECONDS` per-attempt timeout, and
+    `_LLM_RETRY_DELAYS` inter-attempt backoff (1s before the 2nd attempt, 3s
+    before any subsequent). An authentication failure is immediately
+    terminal on ANY attempt — no retry budget is spent on a call that
+    cannot succeed. On final exhaustion, dispatches a CON-004 admin alert
+    (Organization Administrator + Platform Administrator) naming the
+    specific failure type, then raises `_UnanswerableError` carrying that
+    failure type + a failure-type-specific end-user message.
+
+    `LLMKeyUnavailable` (no key configured at all — the External LLM API is
+    never actually reached) is NOT retried and NOT one of CON-004's alerts;
+    it re-raises immediately so the caller falls through to FR-008's own
+    pre-existing generic "unanswerable" handling.
+    """
+    from app.llm.service import LLMKeyUnavailable, complete  # noqa: PLC0415
+    from app.llm.transport import LLMError  # noqa: PLC0415
+
+    last_failure_type: LLMFailureType = LLMFailureType.SERVICE_TIMEOUT
+    last_exc: Exception | None = None
+
+    for attempt in range(1, _LLM_MAX_ATTEMPTS + 1):
+        try:
+            return await asyncio.wait_for(
+                complete(
+                    session=session,
+                    provider=provider,
+                    model=model,
+                    messages=messages,
+                    org_id=org_id,
+                ),
+                timeout=_LLM_ATTEMPT_TIMEOUT_SECONDS,
+            )
+        except LLMKeyUnavailable:
+            raise
+        except (LLMError, TimeoutError) as exc:
+            failure_type = _classify_llm_error(exc)
+            last_failure_type = failure_type
+            last_exc = exc
+            log.error(
+                "llm.call_failed",
+                error=str(exc),
+                org_id=org_id,
+                attempt=attempt,
+                failure_type=failure_type.value,
+            )
+            if failure_type == LLMFailureType.AUTHENTICATION_FAILURE:
+                break
+            if attempt < _LLM_MAX_ATTEMPTS:
+                await asyncio.sleep(_LLM_RETRY_DELAYS[attempt - 1])
+
+    await _dispatch_admin_alert(
+        session,
+        org_id,
+        title="AI assistant unavailable",
+        body=(
+            f"The External LLM API is unavailable ({last_failure_type.value}). "
+            "FAQ browse-only mode remains available."
+        ),
+    )
+    raise _UnanswerableError(
+        f"LLM egress exhausted: {last_failure_type.value}",
+        llm_failure_type=last_failure_type,
+    ) from last_exc
+
+
 async def _call_llm_tiered(
     session: AsyncSession,
     question: str,
@@ -1546,9 +2151,13 @@ async def _call_llm_tiered(
     code detected) is treated identically to "no LLM tier available" —
     _UnanswerableError — so the call is never dispatched (FR-008's existing
     unanswerable/alert path handles the rest).
+
+    CON-004: the actual API call is delegated to
+    `_call_llm_api_with_retry`, which retries transient External-LLM-API
+    failures, classifies terminal ones into CON-004's three named failure
+    types, and dispatches the admin alert — see that function's docstring.
     """
-    from app.llm.service import LLMKeyUnavailable, complete  # noqa: PLC0415
-    from app.llm.transport import LLMError  # noqa: PLC0415
+    from app.llm.service import LLMKeyUnavailable  # noqa: PLC0415
 
     grounding = ""
     if mode == "retrieval_augmented":
@@ -1585,20 +2194,19 @@ async def _call_llm_tiered(
     messages.extend(history)
     messages.append({"role": "user", "content": sanitized_question})
 
+    provider = await _resolve_configured_provider(session, org_id)
+    model = _model_for_provider(provider)
     try:
-        result = await complete(
+        result = await _call_llm_api_with_retry(
             session=session,
-            provider="openai",
-            model="gpt-4o-mini",
+            provider=provider,
+            model=model,
             messages=messages,
             org_id=org_id,
         )
     except LLMKeyUnavailable as exc:
         log.warning("llm.key_unavailable", org_id=org_id)
         raise _UnanswerableError("no LLM key configured") from exc
-    except LLMError as exc:
-        log.error("llm.call_failed", error=str(exc), org_id=org_id)
-        raise _UnanswerableError("LLM transport failure") from exc
 
     content = result["choices"][0]["message"]["content"]
     try:
@@ -1906,7 +2514,18 @@ async def _share_resource(
     org's resource by id (not just their own current org) — the lookup
     explicitly bypasses the TenantScoped auto-filter for this one query,
     the only permitted deviation from automatic tenant isolation for this
-    feature (mirrors T-020's own implementation note)."""
+    feature (mirrors T-020's own implementation note).
+
+    FR-027: promoting a resource to shared (is_shared=True) additionally
+    requires that the resource's OWN creator held the Platform
+    Administrator role at creation time (`creator_role_snapshot ==
+    "platform_admin"`) — raises PlatformShareIneligible otherwise. This is
+    checked server-side on every promotion request; a client can never
+    supply or override the creator's role. Un-sharing (is_shared=False) is
+    always permitted for a genuine Platform Administrator regardless of
+    creator — it only reverses a promotion this same check already
+    approved, never grants new visibility.
+    """
     if not user.is_superuser:
         raise PlatformShareDenied()
 
@@ -1920,6 +2539,9 @@ async def _share_resource(
 
     if resource is None:
         return None
+
+    if is_shared and resource.creator_role_snapshot != _CREATOR_ROLE_PLATFORM_ADMIN:
+        raise PlatformShareIneligible(resource_id)
 
     resource.is_platform_shared = is_shared
     await session.flush()
@@ -2446,6 +3068,7 @@ async def confirm_faq_generation_session(
             question=item.question,
             answer=item.answer,
             created_by_user_id=user.id,
+            creator_role_snapshot=_creator_role_snapshot_for(user),
         )
         session.add(faq)
         await session.flush()
