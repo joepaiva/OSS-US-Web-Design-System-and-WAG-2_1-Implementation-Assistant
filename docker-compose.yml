@@ -1,0 +1,78 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Python/FastAPI Chassis Program packages — the compose file shipped INSIDE the
+# delivered artifact (AB-FR-612 / DM-FR-097). Rendered by ArtifactPackager into
+# the build workspace and packaged into the ZIP the customer receives.
+#
+# THIS IS NOT THE DEPLOY COMPOSE. templates/python-fastapi/docker-compose.yml.tmpl
+# is a different file for a different job: it publishes no host port and joins
+# the platform's Traefik proxy network, both correct there and both useless to a
+# customer running this ZIP on their own machine. Do not merge the two.
+#
+# Keys are copied from that deploy template. Note the DATABASE_URL scheme:
+# `postgresql+psycopg://` is SQLAlchemy-shaped and is NOT interchangeable with
+# the plain `postgresql://` the Go and Node families use.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Migrate, then serve — the same command the deploy compose runs
+    # (DM-FR-097.1). Without it the image's own CMD starts uvicorn against an
+    # un-migrated database and the app exits at startup with
+    # `relation "permissions" does not exist`. That is not hypothetical: it is
+    # what the delivered artifact did before this line existed.
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    ports:
+      # Published, unlike the deploy compose — reach the app at
+      # http://localhost:${APP_HOST_PORT:-8000}/
+      - "${APP_HOST_PORT:-8000}:8000"
+    environment:
+      # Production mode is SET, deliberately. app/auth/mfa_crypto.py refuses the
+      # development MFA key only when `settings.is_prod`; shipping a
+      # non-production flag leaves that refusal dormant.
+      ENV: "prod"
+      DEBUG: "false"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      DATABASE_URL: "postgresql+psycopg://app:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — any strong string, e.g. openssl rand -hex 16}@db:5432/app"
+      REDIS_URL: "redis://redis:6379/0"
+      # ── Secrets: required, and refused by name if absent ──────────────────
+      JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET in .env — at least 32 characters, generate with: openssl rand -hex 32}"
+      MFA_ENCRYPTION_KEY: "${MFA_ENCRYPTION_KEY:?set MFA_ENCRYPTION_KEY in .env — exactly 64 hex characters, generate with: openssl rand -hex 32}"
+      # app/config.py gives llm_encryption_key a development default, so leaving
+      # this unset runs a production app on a published key rather than failing.
+      LLM_ENCRYPTION_KEY: "${LLM_ENCRYPTION_KEY:?set LLM_ENCRYPTION_KEY in .env — exactly 64 hex characters, generate with: openssl rand -hex 32}"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — any strong string, e.g. openssl rand -hex 16}"
+      POSTGRES_DB: app
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:

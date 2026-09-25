@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Administration · {{ app_name | default("Application") }}{% endblock %}
+{% block content %}
+<h1 class="font-heading-xl">Administration</h1>
+<p class="font-body-sm text-base">
+    Manage users{% if is_platform_admin %} and organizations{% endif %} for this application.
+</p>
+
+<div class="grid-row grid-gap margin-top-3">
+    <div class="tablet:grid-col-6">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-md">User Management</h2>
+            <p class="font-body-sm">Create users, assign roles, and activate or deactivate accounts.</p>
+            <a href="/admin/users" class="usa-button">Manage users</a>
+        </div>
+    </div>
+    {% if is_platform_admin %}
+    <div class="tablet:grid-col-6">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-md">Organization Management</h2>
+            <p class="font-body-sm">View existing organizations and create new ones.</p>
+            <a href="/admin/orgs" class="usa-button">Manage organizations</a>
+        </div>
+    </div>
+    {% endif %}
+    {% if is_platform_admin %}
+    <div class="tablet:grid-col-6">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-md">System Health</h2>
+            <p class="font-body-sm">Live application, database, Redis, worker, and LLM-proxy status.</p>
+            <a href="/admin/system-health" class="usa-button">View system health</a>
+        </div>
+    </div>
+    <div class="tablet:grid-col-6">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-md">Platform Health</h2>
+            <p class="font-body-sm">Component inventory, currency, vulnerability scan, and remediation.</p>
+            <a href="/admin/platform-health" class="usa-button">View platform health</a>
+        </div>
+    </div>
+    <div class="tablet:grid-col-6">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-md">FISMA Self-Audit</h2>
+            <p class="font-body-sm">Live, runtime-checked report against this chassis's FISMA baseline.</p>
+            <a href="/admin/fisma-audit" class="usa-button">View self-audit report</a>
+        </div>
+    </div>
+    {% endif %}
+    <div class="tablet:grid-col-6">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-md">LLM Provider Keys</h2>
+            <p class="font-body-sm">Manage encrypted provider API keys{% if is_platform_admin %} and shared-key access{% endif %}.</p>
+            <a href="/admin/llm" class="usa-button">Manage LLM keys</a>
+        </div>
+    </div>
+    <div class="tablet:grid-col-6">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-md">MCP Server Connections</h2>
+            <p class="font-body-sm">Register external MCP servers whose tools the embedded LLM may discover and call.</p>
+            <a href="/admin/mcp" class="usa-button">Manage MCP servers</a>
+        </div>
+    </div>
+    <div class="tablet:grid-col-6">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-md">Reports</h2>
+            <p class="font-body-sm">Usage figures{% if is_platform_admin %} across the platform{% else %} for your organization{% endif %}.</p>
+            <a href="/admin/reports" class="usa-button">View reports</a>
+        </div>
+    </div>
+    <div class="tablet:grid-col-6">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-md">Documentation</h2>
+            <p class="font-body-sm">How it works, the user manual, and the security self-audit.</p>
+            <a href="/admin/docs" class="usa-button">Open documentation</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

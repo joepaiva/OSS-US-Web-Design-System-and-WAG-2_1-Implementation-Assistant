@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard · {{ app_name | default("Application") }}{% endblock %}
+
+{% block content %}
+
+<h1 class="margin-bottom-1">Dashboard</h1>
+<p class="font-body-sm text-base margin-top-0 margin-bottom-4">
+    A reference dashboard demonstrating the Stripe-aesthetic USWDS look. Slot
+    authors mirror this shape for their own domain dashboards.
+</p>
+
+{# Stat cards — floating containers with soft elevation, per §4 of the spec #}
+<div class="grid-row grid-gap margin-bottom-4">
+    <div class="tablet:grid-col-4">
+        <div class="stripe-card">
+            <div class="font-body-2xs text-base text-uppercase letter-spacing-1 margin-bottom-1">
+                Total approvals
+            </div>
+            <div class="font-heading-xl text-base-darker text-bold">{{ stats.total_approvals | default(0) }}</div>
+            <div class="font-body-2xs text-base margin-top-1">
+                <span class="stripe-badge stripe-badge--success">{{ stats.recent_approvals | default(0) }} this week</span>
+            </div>
+        </div>
+    </div>
+    <div class="tablet:grid-col-4">
+        <div class="stripe-card">
+            <div class="font-body-2xs text-base text-uppercase letter-spacing-1 margin-bottom-1">
+                Pending review
+            </div>
+            <div class="font-heading-xl text-base-darker text-bold">{{ stats.pending | default(0) }}</div>
+            <div class="font-body-2xs text-base margin-top-1">
+                <span class="stripe-badge stripe-badge--warning">Action required</span>
+            </div>
+        </div>
+    </div>
+    <div class="tablet:grid-col-4">
+        <div class="stripe-card">
+            <div class="font-body-2xs text-base text-uppercase letter-spacing-1 margin-bottom-1">
+                Active users
+            </div>
+            <div class="font-heading-xl text-base-darker text-bold">{{ stats.active_users | default(0) }}</div>
+            <div class="font-body-2xs text-base margin-top-1">
+                <span class="stripe-badge stripe-badge--info">Across {{ stats.orgs | default(0) }} orgs</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# Activity table — borderless data table, per §4 of the spec #}
+<div class="stripe-card padding-0">
+    <div class="padding-x-3 padding-y-2 border-bottom border-base-lighter">
+        <h2 class="margin-0 font-heading-md">Recent activity</h2>
+    </div>
+    <table class="usa-table usa-table--borderless width-full" style="box-shadow: none; border-radius: 0;">
+        <thead>
+            <tr>
+                <th scope="col">Event</th>
+                <th scope="col">Status</th>
+                <th scope="col">Owner</th>
+                <th scope="col">Time</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if recent_activity %}
+                {% for row in recent_activity %}
+                <tr>
+                    <td>{{ row.title }}</td>
+                    <td>
+                        {% if row.status == "approved" %}
+                        <span class="stripe-badge stripe-badge--success">Approved</span>
+                        {% elif row.status == "submitted" %}
+                        <span class="stripe-badge stripe-badge--info">Submitted</span>
+                        {% elif row.status == "rejected" %}
+                        <span class="stripe-badge stripe-badge--error">Rejected</span>
+                        {% elif row.status == "draft" %}
+                        <span class="stripe-badge">Draft</span>
+                        {% else %}
+                        <span class="stripe-badge">{{ row.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ row.owner_name }}</td>
+                    <td class="font-mono-2xs text-base">{{ row.created_at | default("—") }}</td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="4" class="text-center padding-y-4 text-base">
+                        No activity yet. Create your first record to see it here.
+                    </td>
+                </tr>
+            {% endif %}
+        </tbody>
+    </table>
+</div>
+
+{% endblock %}

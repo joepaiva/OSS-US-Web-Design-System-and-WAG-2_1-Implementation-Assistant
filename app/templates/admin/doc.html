@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.title }} · {{ app_name | default("Application") }}{% endblock %}
+{% block content %}
+<nav aria-label="Breadcrumb" class="margin-bottom-2">
+    <a href="/admin/docs" class="font-body-sm">&larr; Documentation</a>
+</nav>
+
+<article class="usa-prose">
+    {% if doc_html %}
+        {{ doc_html | safe }}
+    {% else %}
+        <h1>{{ doc.title }}</h1>
+        <div class="usa-alert usa-alert--error" role="alert">
+            <div class="usa-alert__body">
+                <p class="usa-alert__text">
+                    This document is currently unavailable.
+                </p>
+            </div>
+        </div>
+    {% endif %}
+</article>
+{% endblock %}

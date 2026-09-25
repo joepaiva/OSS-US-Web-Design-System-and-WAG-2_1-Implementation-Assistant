@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Greeting Service · {{ app_name | default("Application") }}{% endblock %}
+{% block content %}
+<nav aria-label="Breadcrumb" class="margin-bottom-2">
+    <a href="/dashboard" class="font-body-sm">&larr; Dashboard</a>
+</nav>
+
+<h1 class="font-heading-xl">Greeting Service</h1>
+<p class="font-body-sm text-base">
+    A reference/demo slot for the {{ app_name | default("chassis") }} — FR-001..FR-005 of the
+    Greeting Service Build Package, adapted for this chassis variant.
+</p>
+
+<form id="greeting-form" class="usa-form margin-top-3" novalidate>
+    <label class="usa-label" for="greeting-name">Name</label>
+    <input class="usa-input" id="greeting-name" name="name" type="text" maxlength="100" required
+           aria-describedby="greeting-name-hint">
+    <span id="greeting-name-hint" class="usa-hint">1–100 characters.</span>
+
+    <label class="usa-label" for="greeting-locale">Locale</label>
+    <select class="usa-select" id="greeting-locale" name="locale">
+        {% for loc in supported_locales %}
+        <option value="{{ loc }}">{{ loc }}</option>
+        {% endfor %}
+        <option value="de-DE">de-DE (unsupported — demonstrates fallback / LLM extension)</option>
+    </select>
+
+    <div class="usa-checkbox margin-top-2">
+        <input class="usa-checkbox__input" id="greeting-use-llm" name="use_llm" type="checkbox">
+        <label class="usa-checkbox__label" for="greeting-use-llm">
+            Use LLM translation for locales outside the six above
+        </label>
+    </div>
+
+    <button class="usa-button margin-top-3" type="submit">Get greeting</button>
+</form>
+
+<div id="greeting-result" class="margin-top-3" role="status" aria-live="polite" hidden>
+    <div class="usa-alert usa-alert--info">
+        <div class="usa-alert__body">
+            <p class="usa-alert__text" id="greeting-text"></p>
+            <p class="font-body-2xs text-base" id="greeting-meta"></p>
+        </div>
+    </div>
+</div>
+
+<div id="greeting-error" class="margin-top-3" hidden>
+    <div class="usa-alert usa-alert--error">
+        <div class="usa-alert__body">
+            <p class="usa-alert__text" id="greeting-error-text"></p>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById("greeting-form").addEventListener("submit", async function (evt) {
+    evt.preventDefault();
+    const name = document.getElementById("greeting-name").value;
+    const locale = document.getElementById("greeting-locale").value;
+    const useLlm = document.getElementById("greeting-use-llm").checked;
+
+    const resultBox = document.getElementById("greeting-result");
+    const errorBox = document.getElementById("greeting-error");
+    resultBox.hidden = true;
+    errorBox.hidden = true;
+
+    const resp = await fetch("/api/greetings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ name: name, locale: locale, use_llm: useLlm }),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok) {
+        document.getElementById("greeting-error-text").textContent =
+            (data.detail && data.detail.message) || "We couldn't process this request.";
+        errorBox.hidden = false;
+        return;
+    }
+
+    document.getElementById("greeting-text").textContent = data.greeting;
+    let meta = "Locale: " + data.locale;
+    if (data.locale_fallback) meta += " (fell back to your organization's default locale)";
+    meta += " · Source: " + data.translation_source;
+    if (data.tools_used && data.tools_used.length > 0) {
+        meta += " · Tools used: " + data.tools_used.join(", ");
+    }
+    document.getElementById("greeting-meta").textContent = meta;
+    resultBox.hidden = false;
+});
+</script>
+{% endblock %}

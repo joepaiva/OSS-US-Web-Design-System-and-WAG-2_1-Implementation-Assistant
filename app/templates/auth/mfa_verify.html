@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% from "components/forms.html" import text_input, submit_button, form_errors %}
+
+{% block title %}Verify your code · {{ app_name | default("Application") }}{% endblock %}
+{% block shell_modifier %}stripe-shell--narrow{% endblock %}
+
+{# CP-B.8 (Chassis Program, 2026-09-02): the browser-facing completion step
+   for the IA-2(1) MFA challenge login_submit issues in app/frontend.py.
+   Mirrors the JSON API's POST /auth/mfa/verify, at the distinct path
+   POST /login/mfa so it never collides with the JSON route. #}
+{% block content %}
+<div class="stripe-card padding-4">
+    <h1 class="margin-top-0 margin-bottom-1">Enter your verification code</h1>
+    <p class="margin-top-0 margin-bottom-3 text-base">
+        Enter the 6-digit code from your authenticator app, or one of your backup codes.
+    </p>
+
+    {{ form_errors(errors) }}
+
+    <form action="/login/mfa" method="post">
+        <input type="hidden" name="challenge_token" value="{{ challenge_token }}">
+        {{ text_input("code", "Verification code", type="text", errors=errors, autocomplete="one-time-code", placeholder="123456") }}
+        <div class="display-flex flex-justify margin-top-3">
+            <a href="/auth/login" class="font-body-sm" style="align-self: center;">Start over</a>
+            {{ submit_button("Verify") }}
+        </div>
+    </form>
+</div>
+{% endblock %}

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Documentation · {{ app_name | default("Application") }}{% endblock %}
+{% block content %}
+<nav aria-label="Breadcrumb" class="margin-bottom-2">
+    <a href="/admin" class="font-body-sm">&larr; Administration</a>
+</nav>
+
+<h1 class="font-heading-xl">Documentation</h1>
+<p class="font-body-sm text-base">
+    Reference documentation for this application, rendered in-app.
+</p>
+
+<ul class="usa-card-group margin-top-3">
+    {% for doc in docs %}
+    <li class="usa-card tablet:grid-col-6">
+        <div class="usa-card__container">
+            <div class="usa-card__header">
+                <h2 class="usa-card__heading">{{ doc.title }}</h2>
+            </div>
+            <div class="usa-card__body">
+                <p class="font-body-sm">{{ doc.summary }}</p>
+            </div>
+            <div class="usa-card__footer">
+                <a href="/admin/docs/{{ doc.slug }}" class="usa-button">Read</a>
+            </div>
+        </div>
+    </li>
+    {% endfor %}
+</ul>
+{% endblock %}

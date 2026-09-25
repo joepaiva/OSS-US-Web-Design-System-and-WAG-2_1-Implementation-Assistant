@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Reports · {{ app_name | default("Application") }}{% endblock %}
+{% block content %}
+<nav aria-label="Breadcrumb" class="margin-bottom-2">
+    <a href="/admin" class="font-body-sm">&larr; Administration</a>
+</nav>
+
+<h1 class="font-heading-xl">Reports</h1>
+<p class="font-body-sm text-base">
+    {% if report.scope == "platform" %}
+        Platform-wide figures across all organizations.
+    {% else %}
+        Figures for your organization.
+    {% endif %}
+</p>
+
+<div class="grid-row grid-gap margin-top-3">
+    <div class="tablet:grid-col-4">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-sm">Users</h2>
+            <p class="font-heading-xl margin-y-0">{{ report.users_total }}</p>
+            <p class="font-body-2xs text-base">{{ report.users_active }} active</p>
+        </div>
+    </div>
+    {% if report.orgs_total is not none %}
+    <div class="tablet:grid-col-4">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-sm">Organizations</h2>
+            <p class="font-heading-xl margin-y-0">{{ report.orgs_total }}</p>
+        </div>
+    </div>
+    {% endif %}
+    <div class="tablet:grid-col-4">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-sm">Audit events</h2>
+            <p class="font-heading-xl margin-y-0">{{ report.audit_total }}</p>
+        </div>
+    </div>
+    <div class="tablet:grid-col-4">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-sm">Files</h2>
+            <p class="font-heading-xl margin-y-0">{{ report.files_count }}</p>
+            <p class="font-body-2xs text-base">{{ report.files_bytes }} bytes stored</p>
+        </div>
+    </div>
+    <div class="tablet:grid-col-4">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-sm">Notifications</h2>
+            <p class="font-heading-xl margin-y-0">{{ report.notifications_total }}</p>
+            <p class="font-body-2xs text-base">{{ report.notifications_unread }} unread</p>
+        </div>
+    </div>
+    <div class="tablet:grid-col-4">
+        <div class="stripe-card padding-3">
+            <h2 class="font-heading-sm">Active LLM keys</h2>
+            <p class="font-heading-xl margin-y-0">{{ report.llm_keys_active }}</p>
+        </div>
+    </div>
+</div>
+
+<h2 class="font-heading-md margin-top-4">Top audit actions</h2>
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr><th scope="col">Action</th><th scope="col">Count</th></tr>
+    </thead>
+    <tbody>
+        {% for action, count in report.audit_top_actions %}
+        <tr><th scope="row">{{ action }}</th><td>{{ count }}</td></tr>
+        {% else %}
+        <tr><td colspan="2" class="text-base">No audit events yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

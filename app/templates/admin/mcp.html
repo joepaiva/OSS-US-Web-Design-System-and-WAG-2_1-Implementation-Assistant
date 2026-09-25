@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}MCP Server Connections · {{ app_name | default("Application") }}{% endblock %}
+{% block content %}
+<nav aria-label="Breadcrumb" class="margin-bottom-2">
+    <a href="/admin" class="font-body-sm">&larr; Administration</a>
+</nav>
+
+<h1 class="font-heading-xl">MCP Server Connections</h1>
+<p class="font-body-sm text-base">
+    Register external MCP (Model Context Protocol) servers whose tools the embedded LLM may
+    discover and call mid-conversation. Credentials are stored encrypted (AES-256-GCM) and never
+    displayed in full. A new connection is <strong>disabled</strong> by default — registering a
+    server does not, by itself, expose its tools; enable it below when you're ready.
+</p>
+
+{% if flash %}
+<div class="usa-alert usa-alert--{{ 'error' if flash.kind == 'error' else 'success' }} margin-top-2">
+    <div class="usa-alert__body">
+        <p class="usa-alert__text">{{ flash.message }}</p>
+    </div>
+</div>
+{% endif %}
+
+{% if org_id %}
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr>
+            <th scope="col">Name</th>
+            <th scope="col">URL</th>
+            <th scope="col">Credential</th>
+            <th scope="col">Status</th>
+            <th scope="col">Action</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for c in connections %}
+        <tr>
+            <th scope="row">{{ c.name }}</th>
+            <td class="font-mono-2xs">{{ c.url }}</td>
+            <td class="font-mono-sm">{{ c.masked_credential if c.has_credential else '(none — unauthenticated)' }}</td>
+            <td><span class="usa-tag {{ 'bg-mint' if c.enabled else 'bg-base-light' }}">{{ 'enabled' if c.enabled else 'disabled' }}</span></td>
+            <td>
+                {% if c.enabled %}
+                <form method="post" action="/admin/mcp/servers/{{ c.id }}/disable" class="display-inline">
+                    <button type="submit" class="usa-button usa-button--secondary usa-button--unstyled">Disable</button>
+                </form>
+                {% else %}
+                <form method="post" action="/admin/mcp/servers/{{ c.id }}/enable" class="display-inline">
+                    <button type="submit" class="usa-button usa-button--unstyled">Enable</button>
+                </form>
+                {% endif %}
+                <form method="post" action="/admin/mcp/servers/{{ c.id }}/delete" class="display-inline margin-left-1">
+                    <button type="submit" class="usa-button usa-button--secondary usa-button--unstyled">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="text-base">No MCP server connections yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<form method="post" action="/admin/mcp/servers" class="margin-top-2 maxw-tablet">
+    <label class="usa-label" for="mcp-name">Display name</label>
+    <input class="usa-input" id="mcp-name" name="name" required
+           placeholder="internal-ticketing, knowledge-base">
+    <label class="usa-label" for="mcp-url">Server URL</label>
+    <input class="usa-input" id="mcp-url" name="url" type="url" required
+           placeholder="https://mcp.example.com/mcp">
+    <label class="usa-label" for="mcp-credential">Credential (optional)</label>
+    <input class="usa-input" id="mcp-credential" name="credential" type="password"
+           autocomplete="off" placeholder="Leave blank for an unauthenticated server">
+    <button type="submit" class="usa-button margin-top-2">Register server</button>
+</form>
+{% else %}
+<p class="font-body-sm text-base">You are not associated with an organization, so MCP server connections are unavailable.</p>
+{% endif %}
+{% endblock %}

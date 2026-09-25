@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Platform Health · {{ app_name | default("Application") }}{% endblock %}
+{% block content %}
+<nav aria-label="Breadcrumb" class="margin-bottom-2">
+    <a href="/admin" class="font-body-sm">&larr; Administration</a>
+</nav>
+
+<h1 class="font-heading-xl">Platform Health</h1>
+<p class="font-body-sm text-base">Component inventory, currency, vulnerability scan, and gated remediation for this chassis's own dependency tree.</p>
+
+{% if is_stale %}
+<div class="usa-alert usa-alert--warning margin-top-2" role="status" aria-live="polite">
+    <div class="usa-alert__body">
+        <h2 class="usa-alert__heading">Stale — last scan did not complete</h2>
+        <p class="usa-alert__text">
+            The most recent scan attempt failed or is offline. Showing the last SUCCESSFUL scan below
+            {% if latest_successful %}(#{{ latest_successful.id }}, {{ latest_successful.started_at.isoformat() }}){% endif %}.
+            This is never silently reported as "clean" — see the latest attempt's status in the history table.
+        </p>
+    </div>
+</div>
+{% endif %}
+
+{% if latest_successful %}
+<div class="usa-alert usa-alert--{{ 'success' if latest_successful.vulnerability_count == 0 else 'error' }} margin-top-2" role="status" aria-live="polite">
+    <div class="usa-alert__body">
+        <h2 class="usa-alert__heading">
+            {{ 'Zero open vulnerabilities' if latest_successful.vulnerability_count == 0 else latest_successful.vulnerability_count ~ ' open vulnerabilities' }}
+        </h2>
+        <p class="usa-alert__text">
+            {{ latest_successful.component_count }} components scanned, {{ latest_successful.stale_count }} behind latest stable.
+            Scan #{{ latest_successful.id }} — {{ latest_successful.started_at.isoformat() }} — status: {{ latest_successful.status }}.
+        </p>
+    </div>
+</div>
+{% else %}
+<div class="usa-alert usa-alert--warning margin-top-2" role="status">
+    <div class="usa-alert__body">
+        <h2 class="usa-alert__heading">No successful scan yet</h2>
+        <p class="usa-alert__text">Trigger a scan below to establish a baseline.</p>
+    </div>
+</div>
+{% endif %}
+
+<form method="post" action="/admin/platform-health/scan" class="margin-top-2">
+    <button type="submit" class="usa-button">Run scan now</button>
+</form>
+
+{% if findings %}
+<h2 class="font-heading-md margin-top-4">Vulnerability findings</h2>
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr><th scope="col">Component</th><th scope="col">Installed</th><th scope="col">Advisory</th><th scope="col">Fixed in</th></tr>
+    </thead>
+    <tbody>
+        {% for f in findings %}
+        <tr>
+            <td>{{ f.component_name }}</td>
+            <td class="font-mono-sm">{{ f.installed_version }}</td>
+            <td>{{ f.advisory_id }}</td>
+            <td class="font-mono-sm">{{ f.fixed_version or 'unknown' }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+<h2 class="font-heading-md margin-top-4">Component inventory (direct dependencies)</h2>
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr><th scope="col">Component</th><th scope="col">Installed</th><th scope="col">Latest stable</th><th scope="col">Current</th></tr>
+    </thead>
+    <tbody>
+        {% for item in inventory if item.is_direct %}
+        <tr>
+            <td>{{ item.name }}</td>
+            <td class="font-mono-sm">{{ item.installed_version }}</td>
+            <td class="font-mono-sm">{{ item.latest_stable_version or 'unknown' }}</td>
+            <td>
+                {% if item.is_current is none %}
+                    <span class="usa-tag bg-base-light">unknown</span>
+                {% elif item.is_current %}
+                    <span class="usa-tag bg-mint">current</span>
+                {% else %}
+                    <span class="usa-tag bg-gold">behind</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if remediations %}
+<h2 class="font-heading-md margin-top-4">Remediation proposals</h2>
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr><th scope="col">Component</th><th scope="col">Bump</th><th scope="col">Verified</th><th scope="col">Decision</th><th scope="col">Action</th></tr>
+    </thead>
+    <tbody>
+        {% for r in remediations %}
+        <tr>
+            <td>{{ r.component_name }} {{ r.from_version }} &rarr; {{ r.to_version }}</td>
+            <td>{{ r.bump_kind }}</td>
+            <td>{{ r.verification_status }}</td>
+            <td>{{ r.decision }}</td>
+            <td>
+                {% if r.decision == 'held' %}
+                <form method="post" action="/admin/platform-health/remediations/{{ r.id }}/decide" style="display:inline">
+                    <input type="hidden" name="decision" value="approved">
+                    <button type="submit" class="usa-button usa-button--outline">Approve</button>
+                </form>
+                <form method="post" action="/admin/platform-health/remediations/{{ r.id }}/decide" style="display:inline">
+                    <input type="hidden" name="decision" value="rejected">
+                    <button type="submit" class="usa-button usa-button--outline">Reject</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+<h2 class="font-heading-md margin-top-4">Scan history</h2>
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr><th scope="col">#</th><th scope="col">Started</th><th scope="col">Status</th><th scope="col">Vulnerabilities</th></tr>
+    </thead>
+    <tbody>
+        {% for run in history %}
+        <tr>
+            <td>{{ run.id }}</td>
+            <td class="font-mono-sm">{{ run.started_at.isoformat() }}</td>
+            <td><span class="usa-tag {{ 'bg-mint' if run.status == 'ok' else ('bg-gold' if run.status == 'partial' else 'bg-secondary') }}">{{ run.status }}</span></td>
+            <td>{{ run.vulnerability_count }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}Account · {{ app_name | default("Application") }}{% endblock %}
+{% block shell_modifier %}stripe-shell--narrow{% endblock %}
+
+{% block content %}
+<h1 class="margin-bottom-3">Account</h1>
+
+<div class="stripe-card margin-bottom-3">
+    <h2 class="margin-top-0 font-heading-md">Profile</h2>
+    <div class="grid-row grid-gap margin-bottom-2">
+        <div class="grid-col-4 font-body-2xs text-base text-uppercase letter-spacing-1">Email</div>
+        <div class="grid-col-8 text-base-darker">{{ current_user.email }}</div>
+    </div>
+    {% if current_user.full_name %}
+    <div class="grid-row grid-gap margin-bottom-2">
+        <div class="grid-col-4 font-body-2xs text-base text-uppercase letter-spacing-1">Name</div>
+        <div class="grid-col-8 text-base-darker">{{ current_user.full_name }}</div>
+    </div>
+    {% endif %}
+    <div class="grid-row grid-gap">
+        <div class="grid-col-4 font-body-2xs text-base text-uppercase letter-spacing-1">Member since</div>
+        <div class="grid-col-8 text-base-darker">{{ current_user.created_at.strftime('%B %Y') }}</div>
+    </div>
+</div>
+
+<form action="/auth/logout" method="post">
+    <button type="submit" class="usa-button usa-button--outline">Sign out</button>
+</form>
+{% endblock %}

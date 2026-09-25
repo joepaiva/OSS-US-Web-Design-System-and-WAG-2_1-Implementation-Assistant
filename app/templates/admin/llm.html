@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}LLM Provider Keys · {{ app_name | default("Application") }}{% endblock %}
+{% block content %}
+<nav aria-label="Breadcrumb" class="margin-bottom-2">
+    <a href="/admin" class="font-body-sm">&larr; Administration</a>
+</nav>
+
+<h1 class="font-heading-xl">LLM Provider Keys</h1>
+<p class="font-body-sm text-base">
+    Provider API keys are stored encrypted (AES-256-GCM) and never displayed in full.
+    Calls resolve an org key first, then the platform-shared key when policy allows.
+</p>
+
+{# ─── Org keys ─────────────────────────────────────────────────────── #}
+<h2 class="font-heading-md margin-top-4">Organization keys</h2>
+{% if org_id %}
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr><th scope="col">Provider</th><th scope="col">Key</th><th scope="col">Status</th><th scope="col">Action</th></tr>
+    </thead>
+    <tbody>
+        {% for k in org_keys %}
+        <tr>
+            <th scope="row">{{ k.provider }}</th>
+            <td class="font-mono-sm">{{ k.masked }}</td>
+            <td><span class="usa-tag {{ 'bg-mint' if k.is_active else 'bg-base-light' }}">{{ 'active' if k.is_active else 'inactive' }}</span></td>
+            <td>
+                {% if k.is_active %}
+                <form method="post" action="/admin/llm/keys/{{ k.id }}/deactivate">
+                    <button type="submit" class="usa-button usa-button--secondary usa-button--unstyled">Deactivate</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="text-base">No organization keys yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<form method="post" action="/admin/llm/keys" class="margin-top-2 maxw-tablet">
+    <input type="hidden" name="scope" value="org">
+    <label class="usa-label" for="org-provider">Provider</label>
+    <input class="usa-input" id="org-provider" name="provider" required
+           placeholder="anthropic, openai, gemini">
+    <label class="usa-label" for="org-key">API key</label>
+    <input class="usa-input" id="org-key" name="api_key" type="password" required
+           autocomplete="off">
+    <button type="submit" class="usa-button margin-top-2">Save organization key</button>
+</form>
+{% else %}
+<p class="font-body-sm text-base">You are not associated with an organization, so organization keys are unavailable.</p>
+{% endif %}
+
+{# ─── Shared keys (platform admins only) ───────────────────────────── #}
+{% if is_platform_admin %}
+<h2 class="font-heading-md margin-top-4">Platform-shared keys</h2>
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr><th scope="col">Provider</th><th scope="col">Key</th><th scope="col">Status</th><th scope="col">Action</th></tr>
+    </thead>
+    <tbody>
+        {% for k in shared_keys %}
+        <tr>
+            <th scope="row">{{ k.provider }}</th>
+            <td class="font-mono-sm">{{ k.masked }}</td>
+            <td><span class="usa-tag {{ 'bg-mint' if k.is_active else 'bg-base-light' }}">{{ 'active' if k.is_active else 'inactive' }}</span></td>
+            <td>
+                {% if k.is_active %}
+                <form method="post" action="/admin/llm/keys/{{ k.id }}/deactivate">
+                    <button type="submit" class="usa-button usa-button--secondary usa-button--unstyled">Deactivate</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="text-base">No shared keys yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<form method="post" action="/admin/llm/keys" class="margin-top-2 maxw-tablet">
+    <input type="hidden" name="scope" value="shared">
+    <label class="usa-label" for="shared-provider">Provider</label>
+    <input class="usa-input" id="shared-provider" name="provider" required
+           placeholder="anthropic, openai, gemini">
+    <label class="usa-label" for="shared-key">API key</label>
+    <input class="usa-input" id="shared-key" name="api_key" type="password" required
+           autocomplete="off">
+    <button type="submit" class="usa-button margin-top-2">Save shared key</button>
+</form>
+
+{# ─── Per-org shared-access policy ─────────────────────────────────── #}
+<h2 class="font-heading-md margin-top-4">Shared-key access policy</h2>
+<p class="font-body-sm text-base">
+    Choose which organizations may fall back to the platform-shared key when they have no key of their own. Default is denied.
+</p>
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr><th scope="col">Organization</th><th scope="col">Shared access</th><th scope="col">Action</th></tr>
+    </thead>
+    <tbody>
+        {% for org in org_access %}
+        <tr>
+            <th scope="row">{{ org.name }} <span class="text-base">({{ org.slug }})</span></th>
+            <td><span class="usa-tag {{ 'bg-mint' if org.allow_shared_key else 'bg-base-light' }}">{{ 'allowed' if org.allow_shared_key else 'denied' }}</span></td>
+            <td>
+                <form method="post" action="/admin/llm/access">
+                    <input type="hidden" name="org_id_target" value="{{ org.id }}">
+                    {% if org.allow_shared_key %}
+                        {# Submitting with allow absent => deny #}
+                        <button type="submit" class="usa-button usa-button--secondary usa-button--unstyled">Revoke access</button>
+                    {% else %}
+                        <input type="hidden" name="allow" value="on">
+                        <button type="submit" class="usa-button usa-button--unstyled">Grant access</button>
+                    {% endif %}
+                </form>
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3" class="text-base">No organizations yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endblock %}

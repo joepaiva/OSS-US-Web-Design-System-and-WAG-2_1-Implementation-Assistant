@@ -1,0 +1,175 @@
+[project]
+name = "chassis-python"
+version = "0.1.0"
+description = "Python (FastAPI + SQLAlchemy 2.0 async + Pydantic v2) chassis for the SD-Agile Platform Stack Templates architecture"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Proprietary" }
+
+# CANONICAL DEPENDENCY SET for this package (chassis-program-mt-fisma-moderate-llm).
+# Diverges from chassis/python-fastapi's own pins per the zero-CVE / latest-stable
+# mandate (chassis-program-CONSTITUTION.md §5) -- every pin here is the latest
+# stable PyPI release as of the 2026-09-02 CP-B.3 remediation pass, and CI
+# (once wired, chassis-program-DESIGN.md §5) re-verifies this on every push.
+#
+# LLM-generated business-logic slots MUST adhere to these versions. Drift is
+# enforced by chassis ForbiddenPatterns and mypy --strict.
+dependencies = [
+    # Web framework + ASGI server
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.4",
+    # Database — SQLAlchemy 2.0 async + Alembic + psycopg3 async driver
+    "sqlalchemy[asyncio]==2.0.52",
+    "alembic==1.19.2",
+    "psycopg[binary,pool]==3.3.5",
+    # Validation + settings — Pydantic v2 ONLY
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+    # Auth — JWT + bcrypt
+    # NOTE (2026-09-02, CP-B.3): python-jose + passlib were both replaced this
+    # pass. python-jose carried 5 open CVEs with no further fix release
+    # expected, and pulled in `ecdsa` (PYSEC-2026-1325, no fix available --
+    # ecdsa's own maintainers do not consider the underlying timing-side-
+    # channel issue fixable in pure Python) even though this chassis only
+    # ever signs with HS256/384/512, which PyJWT handles with zero ecdsa/rsa
+    # dependency. passlib 1.7.4 is PyPI's latest release and its bcrypt-
+    # backend version probe is incompatible with bcrypt>=4.1 (documented in
+    # the reference chassis's own history) -- with no newer passlib to fix
+    # that, `bcrypt` is now called directly (app/auth/password_hashing.py)
+    # instead of through passlib, removing the ceiling on the bcrypt pin.
+    "pyjwt==2.13.0",
+    "bcrypt==5.0.0",
+    # Observability — structlog + Prometheus
+    "structlog==26.1.0",
+    "prometheus-fastapi-instrumentator==8.1.0",
+    # Background tasks — RQ over Redis
+    "rq==2.12.0",
+    "redis==8.1.0",
+    # Templates + admin shell (v0.5 adds python-multipart for Form() handling)
+    "jinja2==3.1.6",
+    "python-multipart==0.0.32",
+    # Transactional email
+    "fastapi-mail==1.6.8",
+    "cryptography>=50.0.1",
+    # MFA — TOTP (IA-2(1), chassis-program FISMA-Moderate mandate)
+    "pyotp==2.10.0",
+    "pip-audit>=2.10.1",
+    # MCP client (FR-MCPCLIENT, chassis-program 2026-09-10) — official Python MCP
+    # SDK (modelcontextprotocol/python-sdk). Client surface only (mcp.Client);
+    # the server-authoring API (mcp.server.mcpserver.MCPServer) is used only by
+    # the test fixture, never shipped in the running app. Verified latest-stable
+    # + MIT-licensed on PyPI at pin time (2026-09-10).
+    "mcp==2.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "httpx==0.28.1",
+    "factory-boy==3.3.3",
+    "mypy==2.3.1",
+    "ruff==0.16.5",
+    "pre-commit==4.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ─────────────────────────────────────────────────────────────────────
+# Type-checker — mypy --strict on slots/, advisory on chassis code
+# ─────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+strict = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# FR-388 / Risk 1 mitigation layer 5 — `app/slots/` is where LLMs write.
+# Strict mode enforces modern Pydantic v2 + SQLAlchemy 2.0 + async patterns.
+module = "app.slots.*"
+strict = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+warn_return_any = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# ─────────────────────────────────────────────────────────────────────
+# Linter / formatter — ruff
+# ─────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle + pyflakes
+    "I",             # isort
+    "B",             # flake8-bugbear
+    "UP",            # pyupgrade (catches Optional[X] vs X | None)
+    "ASYNC",         # flake8-async
+    "SIM",           # flake8-simplify
+]
+ignore = [
+    "E501",  # line too long — handled by formatter
+    "B008",  # Depends(...) in a default argument IS the canonical FastAPI
+             # dependency-injection pattern; flake8-bugbear's function-call-
+             # in-default check has no special case for it, so this project
+             # ignores it project-wide rather than `noqa`-ing every route.
+]
+
+# ─────────────────────────────────────────────────────────────────────
+# Test runner — pytest
+# ─────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# "tests" holds chassis-level tests; "app" is required too so slot-local
+# suites under app/slots/<domain>/tests/ (the documented slot-test
+# pattern — see app/slots/example/tests/test_routes.py's own docstring)
+# are actually collected by a bare `pytest` / `uv run pytest -q` (the
+# exact invocation .github/workflows/chassis-ci.yml uses). Without "app"
+# here, CI silently never runs any slot's tests — a false-green: the
+# reported pass count looked complete while whole suites were never
+# collected. Found while adding app/slots/greeting/tests/ (chassis-program
+# Phase B, CP-B.5) and fixed immediately rather than left in place.
+testpaths = ["tests", "app"]
+python_files = ["test_*.py"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: integration tests requiring docker-compose stack",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    "app/*/migrations/*",
+    "*/__init__.py",
+    # Entry points: not unit-testable in process; covered via integration
+    # in docker-compose / Phase 1.10 deploy smoke.
+    "app/tasks/worker.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]

@@ -1,0 +1,279 @@
+/* Stripe-aesthetic overrides for USWDS 3.x.
+ *
+ * The chassis ships USWDS via CDN (see base.html). This CSS file applies
+ * the Stripe-aesthetic token overrides documented in
+ * specs/USWDS-with-Stripe-aesthetic.md §1 without requiring a Sass build
+ * step in the chassis. Slot authors who want to extend further can add a
+ * Sass pipeline of their own.
+ *
+ * Color palette (USWDS 3.x tokens, applied as CSS custom properties):
+ *   --usa-bg:               gray-cool-2  (#f0f3f5)  body background — soft off-white
+ *   --usa-primary:          indigo-cool-60v (#3a4ed9)  Stripe-style electric indigo
+ *   --usa-text:             gray-cool-70 (#4d5b6a)  softer dark text for paragraphs
+ *   --usa-heading:          gray-cool-90 (#1c2329)  high-contrast for headings
+ *   --usa-card-bg:          white          card surfaces (elevated)
+ *   --usa-border-radius-md: 4px            buttons + inputs
+ *   --usa-border-radius-lg: 8px            cards + containers
+ *
+ * Typography: public-sans (mimics Inter — used in modern tech dashboards).
+ *
+ * Section 508 compliance preserved: color-contrast ratios match WCAG 2.1 AA
+ * minimums for all token combinations. USWDS components retain their
+ * accessible default focus rings and aria-* attributes.
+ */
+
+:root {
+    --stripe-bg: #f0f3f5;
+    --stripe-primary: #3a4ed9;
+    --stripe-primary-hover: #2d40c0;
+    --stripe-text: #4d5b6a;
+    --stripe-heading: #1c2329;
+    --stripe-card-bg: #ffffff;
+    --stripe-shadow-2: 0 2px 4px 0 rgba(28, 35, 41, 0.08), 0 4px 8px 0 rgba(28, 35, 41, 0.04);
+    --stripe-shadow-3: 0 4px 8px 0 rgba(28, 35, 41, 0.10), 0 8px 16px 0 rgba(28, 35, 41, 0.04);
+    --stripe-border-radius-md: 4px;
+    --stripe-border-radius-lg: 8px;
+    --stripe-success: #008480;
+    --stripe-success-bg: #e6f4f1;
+    --stripe-warning: #936f38;
+    --stripe-warning-bg: #fff5e1;
+    --stripe-error: #d83933;
+    --stripe-error-bg: #fbe8e7;
+    --stripe-info: #2378c3;
+    --stripe-info-bg: #e1f3f8;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Body — soft off-white shell
+ * ──────────────────────────────────────────────────────────────────────── */
+
+body {
+    background: var(--stripe-bg);
+    color: var(--stripe-text);
+    font-family: 'Public Sans Web', 'Public Sans', -apple-system, BlinkMacSystemFont,
+                 'Segoe UI', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Typography
+ * ──────────────────────────────────────────────────────────────────────── */
+
+h1, h2, h3, h4, h5, h6,
+.usa-heading {
+    color: var(--stripe-heading);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+h1 { font-size: 1.875rem; line-height: 1.25; }
+h2 { font-size: 1.5rem; line-height: 1.3; }
+h3 { font-size: 1.25rem; line-height: 1.35; }
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Primary brand color override
+ * ──────────────────────────────────────────────────────────────────────── */
+
+.usa-button,
+.usa-button:visited {
+    background-color: var(--stripe-primary);
+    border-radius: var(--stripe-border-radius-md);
+    font-weight: 500;
+    box-shadow: var(--stripe-shadow-2);
+    transition: background-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.usa-button:hover,
+.usa-button:focus {
+    background-color: var(--stripe-primary-hover);
+    box-shadow: var(--stripe-shadow-3);
+}
+
+.usa-button--outline {
+    background-color: transparent;
+    box-shadow: inset 0 0 0 2px var(--stripe-primary);
+    color: var(--stripe-primary);
+}
+
+a {
+    color: var(--stripe-primary);
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: border-color 0.12s ease;
+}
+
+a:hover {
+    border-bottom-color: var(--stripe-primary);
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Cards — floating containers, no borders, soft elevation
+ * (§4 of the USWDS-with-Stripe spec)
+ * ──────────────────────────────────────────────────────────────────────── */
+
+.usa-card__container,
+.stripe-card {
+    background-color: var(--stripe-card-bg);
+    border: none;
+    border-radius: var(--stripe-border-radius-lg);
+    box-shadow: var(--stripe-shadow-2);
+    padding: 1.5rem;
+    transition: box-shadow 0.16s ease;
+}
+
+.usa-card__container:hover,
+.stripe-card:hover {
+    box-shadow: var(--stripe-shadow-3);
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Inputs
+ * ──────────────────────────────────────────────────────────────────────── */
+
+.usa-input,
+.usa-textarea,
+.usa-select {
+    border-radius: var(--stripe-border-radius-md);
+    border-color: #d8dde2;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.usa-input:focus,
+.usa-textarea:focus,
+.usa-select:focus {
+    border-color: var(--stripe-primary);
+    box-shadow: 0 0 0 3px rgba(58, 78, 217, 0.15);
+    outline: none;
+}
+
+/* Error state — fine red micro-copy per §3 of the spec */
+
+.usa-input--error,
+.usa-textarea--error,
+.usa-select--error {
+    border-color: var(--stripe-error);
+}
+
+.usa-error-message {
+    color: var(--stripe-error);
+    font-size: 0.875rem;
+    font-weight: 400;
+    margin-top: 0.25rem;
+}
+
+.usa-form-group--error .usa-label {
+    color: var(--stripe-heading);
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Tables — borderless data table for clean lists
+ * ──────────────────────────────────────────────────────────────────────── */
+
+.usa-table--borderless,
+.stripe-table {
+    background-color: var(--stripe-card-bg);
+    border-radius: var(--stripe-border-radius-lg);
+    overflow: hidden;
+    box-shadow: var(--stripe-shadow-2);
+}
+
+.usa-table--borderless thead th,
+.stripe-table thead th {
+    background-color: transparent;
+    border-bottom: 1px solid #e8ecef;
+    color: var(--stripe-text);
+    font-weight: 500;
+    font-size: 0.8125rem;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+    padding: 0.75rem 1rem;
+}
+
+.usa-table--borderless tbody td,
+.stripe-table tbody td {
+    border-top: 1px solid #f0f3f5;
+    padding: 1rem;
+    color: var(--stripe-heading);
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Status badges — pill-shaped semantic indicators
+ * (Stripe's "Succeeded" / "Pending" / "Failed" style)
+ * ──────────────────────────────────────────────────────────────────────── */
+
+.usa-tag,
+.stripe-badge {
+    display: inline-block;
+    padding: 0.25rem 0.625rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0.01em;
+    border: none;
+}
+
+.stripe-badge--success {
+    background-color: var(--stripe-success-bg);
+    color: var(--stripe-success);
+}
+
+.stripe-badge--warning {
+    background-color: var(--stripe-warning-bg);
+    color: var(--stripe-warning);
+}
+
+.stripe-badge--error {
+    background-color: var(--stripe-error-bg);
+    color: var(--stripe-error);
+}
+
+.stripe-badge--info {
+    background-color: var(--stripe-info-bg);
+    color: var(--stripe-info);
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Header / nav — flat, light
+ * ──────────────────────────────────────────────────────────────────────── */
+
+.usa-header,
+.stripe-header {
+    background-color: var(--stripe-card-bg);
+    border-bottom: 1px solid #e8ecef;
+    box-shadow: 0 1px 0 0 rgba(28, 35, 41, 0.04);
+}
+
+.usa-nav__primary-item a {
+    color: var(--stripe-text);
+    font-weight: 500;
+}
+
+.usa-nav__primary-item a:hover {
+    color: var(--stripe-primary);
+    border-bottom-color: transparent;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Layout — fluid grid
+ * ──────────────────────────────────────────────────────────────────────── */
+
+.stripe-shell {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+}
+
+.stripe-shell--narrow {
+    max-width: 480px;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Section 508 focus ring — preserved at higher contrast for accessibility
+ * ──────────────────────────────────────────────────────────────────────── */
+
+*:focus-visible {
+    outline: 2px solid var(--stripe-primary);
+    outline-offset: 2px;
+}

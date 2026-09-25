@@ -1,0 +1,45 @@
+{# K.10 — Reusable page-state partials (chassis v0.6.4+).
+
+Three universal page states (loading, empty, error). The Spec Builder
+treats these as chassis-locked; the wizard's chassis facilitation
+override asks once per topic and never re-asks.
+
+USWDS class contract documented in chassis/python-fastapi/docs/STATE-HANDLING.md.
+Slot code MUST use these macros, NOT hand-rolled HTML.
+#}
+
+{# ─── Loading ─────────────────────────────────────────────────────── #}
+{% macro state_loading(message="Loading…") -%}
+<div class="usa-prose" role="status" aria-live="polite">
+  <span class="usa-icon" aria-hidden="true">
+    {# USWDS-compatible plain text indicator; sprite swap left to slot author #}
+    ●
+  </span>
+  <span>{{ message }}</span>
+</div>
+{%- endmacro %}
+
+{# ─── Empty ───────────────────────────────────────────────────────── #}
+{% macro state_empty(message, cta_url=None, cta_label=None) -%}
+<div class="usa-alert usa-alert--info usa-alert--no-icon" role="status">
+  <div class="usa-alert__body">
+    <p class="usa-alert__text">{{ message }}</p>
+    {% if cta_url and cta_label %}
+    <a class="usa-button" href="{{ cta_url }}">{{ cta_label }}</a>
+    {% endif %}
+  </div>
+</div>
+{%- endmacro %}
+
+{# ─── Error ───────────────────────────────────────────────────────── #}
+{% macro state_error(message, retry_url=None, retry_label="Try again") -%}
+<div class="usa-alert usa-alert--error" role="alert">
+  <div class="usa-alert__body">
+    <h4 class="usa-alert__heading">Something went wrong</h4>
+    <p class="usa-alert__text">{{ message }}</p>
+    {% if retry_url %}
+    <a class="usa-button usa-button--secondary" href="{{ retry_url }}">{{ retry_label }}</a>
+    {% endif %}
+  </div>
+</div>
+{%- endmacro %}

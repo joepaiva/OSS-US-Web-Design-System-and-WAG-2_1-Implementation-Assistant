@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}System Health · {{ app_name | default("Application") }}{% endblock %}
+{% block content %}
+<nav aria-label="Breadcrumb" class="margin-bottom-2">
+    <a href="/admin" class="font-body-sm">&larr; Administration</a>
+</nav>
+
+<h1 class="font-heading-xl">System Health</h1>
+
+<div class="usa-alert usa-alert--{{ 'success' if health.all_ok else 'warning' }} margin-top-2" role="status" aria-live="polite">
+    <div class="usa-alert__body">
+        <h2 class="usa-alert__heading">
+            {{ 'All systems operational' if health.all_ok else 'Degraded — a dependency is unreachable' }}
+        </h2>
+        <p class="usa-alert__text">
+            Overall status: <strong>{{ health.overall }}</strong>.
+        </p>
+    </div>
+</div>
+
+<h2 class="font-heading-md margin-top-4">Application</h2>
+<table class="usa-table usa-table--borderless width-full">
+    <tbody>
+        <tr><th scope="row">App version</th><td>{{ health.version }}</td></tr>
+        <tr><th scope="row">Chassis version</th><td>{{ health.chassis_version }}</td></tr>
+        <tr><th scope="row">Environment</th><td>{{ health.env }}</td></tr>
+        <tr><th scope="row">Debug mode</th><td>{{ 'on' if health.debug else 'off' }}</td></tr>
+        <tr><th scope="row">Started at</th><td>{{ health.started_at.isoformat() if health.started_at else 'unknown' }}</td></tr>
+    </tbody>
+</table>
+
+<h2 class="font-heading-md margin-top-4">Dependencies</h2>
+<table class="usa-table usa-table--borderless width-full">
+    <thead>
+        <tr>
+            <th scope="col">Dependency</th>
+            <th scope="col">Status</th>
+            <th scope="col">Detail</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for dep in health.dependencies %}
+        <tr>
+            <th scope="row" class="text-capitalize">{{ dep.name }}</th>
+            <td>
+                <span class="usa-tag {{ 'bg-mint' if dep.ok else 'bg-secondary' }}">
+                    {{ 'reachable' if dep.ok else 'unreachable' }}
+                </span>
+            </td>
+            <td class="font-mono-sm">{{ dep.detail }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<p class="font-body-sm text-base margin-top-3">
+    Machine-readable probes: <code>/healthz</code> (liveness),
+    <code>/readyz</code> (readiness), <code>/version</code>.
+</p>
+{% endblock %}

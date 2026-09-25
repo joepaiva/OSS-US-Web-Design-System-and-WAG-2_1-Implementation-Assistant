@@ -1,0 +1,128 @@
+{# Reusable Jinja2 form macros — USWDS 3.x + Stripe-aesthetic.
+
+   Per §3 of specs/USWDS-with-Stripe-aesthetic.md:
+   - Stacked layout (label above input)
+   - Pydantic v2 validation errors mapped to USWDS error classes
+   - Fine red micro-copy matching Stripe's validation states.
+
+   Usage in a view template:
+
+       {% from "components/forms.html" import text_input, textarea, submit_button %}
+       <form action="/auth/login" method="post">
+           {{ text_input("email", "Email", value=form_data.email, errors=errors) }}
+           {{ text_input("password", "Password", type="password", errors=errors) }}
+           {{ submit_button("Sign in") }}
+       </form>
+
+   The `errors` param is a dict keyed by field name, value = list of error
+   strings (the Pydantic v2 ValidationError.errors() shape transformed in
+   the route handler).
+#}
+
+
+{# ─────────────────────────────────────────────────────────────────────
+   text_input — single-line input with optional error state.
+   ────────────────────────────────────────────────────────────────────── #}
+{% macro text_input(name, label, type="text", value="", required=true, errors=None, autocomplete=None, placeholder=None) %}
+    {% set field_errors = (errors or {}).get(name, []) %}
+    {% set has_error = field_errors | length > 0 %}
+    <div class="usa-form-group {% if has_error %}usa-form-group--error{% endif %} margin-bottom-2">
+        <label class="usa-label" for="field-{{ name }}">
+            {{ label }}{% if required %} <abbr title="required" class="usa-hint usa-hint--required">*</abbr>{% endif %}
+        </label>
+        {% for err in field_errors %}
+        <span class="usa-error-message" role="alert">{{ err }}</span>
+        {% endfor %}
+        <input
+            class="usa-input {% if has_error %}usa-input--error{% endif %}"
+            id="field-{{ name }}"
+            name="{{ name }}"
+            type="{{ type }}"
+            value="{{ value | default('', true) }}"
+            {% if required %}required{% endif %}
+            {% if autocomplete %}autocomplete="{{ autocomplete }}"{% endif %}
+            {% if placeholder %}placeholder="{{ placeholder }}"{% endif %}
+            aria-describedby="{% if has_error %}field-{{ name }}-error{% endif %}"
+        >
+    </div>
+{% endmacro %}
+
+
+{# ─────────────────────────────────────────────────────────────────────
+   textarea — multi-line input.
+   ────────────────────────────────────────────────────────────────────── #}
+{% macro textarea(name, label, value="", required=false, errors=None, rows=4) %}
+    {% set field_errors = (errors or {}).get(name, []) %}
+    {% set has_error = field_errors | length > 0 %}
+    <div class="usa-form-group {% if has_error %}usa-form-group--error{% endif %} margin-bottom-2">
+        <label class="usa-label" for="field-{{ name }}">
+            {{ label }}{% if required %} <abbr title="required" class="usa-hint usa-hint--required">*</abbr>{% endif %}
+        </label>
+        {% for err in field_errors %}
+        <span class="usa-error-message" role="alert">{{ err }}</span>
+        {% endfor %}
+        <textarea
+            class="usa-textarea {% if has_error %}usa-textarea--error{% endif %}"
+            id="field-{{ name }}"
+            name="{{ name }}"
+            rows="{{ rows }}"
+            {% if required %}required{% endif %}
+        >{{ value | default('', true) }}</textarea>
+    </div>
+{% endmacro %}
+
+
+{# ─────────────────────────────────────────────────────────────────────
+   select_field — dropdown.
+   options: list of (value, label) tuples
+   ────────────────────────────────────────────────────────────────────── #}
+{% macro select_field(name, label, options, value="", required=true, errors=None) %}
+    {% set field_errors = (errors or {}).get(name, []) %}
+    {% set has_error = field_errors | length > 0 %}
+    <div class="usa-form-group {% if has_error %}usa-form-group--error{% endif %} margin-bottom-2">
+        <label class="usa-label" for="field-{{ name }}">
+            {{ label }}{% if required %} <abbr title="required" class="usa-hint usa-hint--required">*</abbr>{% endif %}
+        </label>
+        {% for err in field_errors %}
+        <span class="usa-error-message" role="alert">{{ err }}</span>
+        {% endfor %}
+        <select
+            class="usa-select {% if has_error %}usa-select--error{% endif %}"
+            id="field-{{ name }}"
+            name="{{ name }}"
+            {% if required %}required{% endif %}
+        >
+            {% for opt_value, opt_label in options %}
+            <option value="{{ opt_value }}" {% if opt_value == value %}selected{% endif %}>{{ opt_label }}</option>
+            {% endfor %}
+        </select>
+    </div>
+{% endmacro %}
+
+
+{# ─────────────────────────────────────────────────────────────────────
+   submit_button — Stripe-style primary action.
+   ────────────────────────────────────────────────────────────────────── #}
+{% macro submit_button(label, variant="default") %}
+    <button class="usa-button {% if variant == 'outline' %}usa-button--outline{% endif %} margin-top-1" type="submit">
+        {{ label }}
+    </button>
+{% endmacro %}
+
+
+{# ─────────────────────────────────────────────────────────────────────
+   form_errors — render aggregate, non-field-specific errors at top.
+   Useful for "Invalid credentials" / "Service unavailable" messages.
+   ────────────────────────────────────────────────────────────────────── #}
+{% macro form_errors(errors) %}
+    {% set general = (errors or {}).get('_form', []) %}
+    {% if general | length > 0 %}
+    <div class="usa-alert usa-alert--error usa-alert--slim margin-bottom-3" role="alert">
+        <div class="usa-alert__body">
+            {% for err in general %}
+            <p class="usa-alert__text">{{ err }}</p>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+{% endmacro %}

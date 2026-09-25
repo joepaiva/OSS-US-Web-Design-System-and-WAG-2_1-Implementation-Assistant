@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Organizations · Administration{% endblock %}
+{% block content %}
+<nav aria-label="Breadcrumb" class="margin-bottom-2">
+    <a href="/admin" class="font-body-3xs">&larr; Administration</a>
+</nav>
+<h1 class="font-heading-xl">Organization Management</h1>
+<p class="font-body-sm text-base">All organizations in this application.</p>
+
+<table class="usa-table usa-table--borderless width-full margin-top-2">
+    <caption class="usa-sr-only">List of organizations</caption>
+    <thead>
+        <tr>
+            <th scope="col">Name</th>
+            <th scope="col">Slug</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for o in orgs %}
+        <tr>
+            <td>{{ o.name }}</td>
+            <td><code>{{ o.slug }}</code></td>
+        </tr>
+    {% else %}
+        <tr><td colspan="2">No organizations yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+<div class="stripe-card padding-3 margin-top-4 maxw-tablet">
+    <h2 class="font-heading-md">Create an organization</h2>
+    <form method="post" action="/admin/orgs" class="usa-form">
+        <label class="usa-label" for="name">Name</label>
+        <input class="usa-input" id="name" name="name" type="text" required>
+
+        <label class="usa-label" for="slug">Slug</label>
+        <input class="usa-input" id="slug" name="slug" type="text"
+               pattern="[a-z0-9\-]+" required
+               aria-describedby="slug-hint">
+        <span class="usa-hint" id="slug-hint">Lowercase letters, numbers, and hyphens.</span>
+
+        <button type="submit" class="usa-button margin-top-3">Create organization</button>
+    </form>
+</div>
+{% endblock %}

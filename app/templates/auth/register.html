@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "components/forms.html" import text_input, submit_button, form_errors %}
+
+{% block title %}Create account · {{ app_name | default("Application") }}{% endblock %}
+{% block shell_modifier %}stripe-shell--narrow{% endblock %}
+
+{% block content %}
+<div class="stripe-card padding-4">
+    <h1 class="margin-top-0 margin-bottom-1">Create your account</h1>
+    <p class="margin-top-0 margin-bottom-3 text-base">
+        It only takes a minute. You'll need an email and a strong password.
+    </p>
+
+    {{ form_errors(errors) }}
+
+    <form action="/auth/register" method="post">
+        {{ text_input("email", "Email", type="email", value=form_data.email, errors=errors, autocomplete="email") }}
+        {{ text_input("full_name", "Full name", value=form_data.full_name, errors=errors, required=false, autocomplete="name") }}
+        {{ text_input("password", "Password", type="password", errors=errors, autocomplete="new-password") }}
+        <div class="display-flex flex-justify margin-top-3">
+            <a href="/auth/login" class="font-body-sm" style="align-self: center;">Already have an account?</a>
+            {{ submit_button("Create account") }}
+        </div>
+    </form>
+
+    <p class="font-body-2xs text-base margin-top-3">
+        By creating an account you agree to the platform's terms of service and privacy policy.
+    </p>
+</div>
+{% endblock %}

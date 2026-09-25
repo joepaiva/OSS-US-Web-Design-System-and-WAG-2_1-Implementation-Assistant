@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}{{ error.title | default("Error") }} · {{ app_name | default("Application") }}{% endblock %}
+{% block shell_modifier %}stripe-shell--narrow{% endblock %}
+
+{% block content %}
+<div class="stripe-card padding-4 text-center">
+    <div class="font-body-xs text-base margin-bottom-2 text-uppercase letter-spacing-1">
+        Error {{ error.status_code | default(500) }}
+    </div>
+    <h1 class="margin-top-0 margin-bottom-2">{{ error.title | default("Something went wrong") }}</h1>
+    <p class="text-base margin-bottom-3">
+        {{ error.message | default("An unexpected error occurred. Our team has been notified.") }}
+    </p>
+    <a href="/" class="usa-button">Return home</a>
+</div>
+{% endblock %}

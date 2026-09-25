@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Access denied · Administration{% endblock %}
+{% block content %}
+<div class="usa-alert usa-alert--error" role="alert">
+    <div class="usa-alert__body">
+        <h1 class="usa-alert__heading font-heading-lg">Access denied</h1>
+        <p class="usa-alert__text">
+            You don't have permission to access the administration area. If you believe
+            this is a mistake, contact an administrator.
+        </p>
+    </div>
+</div>
+<a href="/dashboard" class="usa-button margin-top-3">Back to dashboard</a>
+{% endblock %}

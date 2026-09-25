@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% from "components/forms.html" import text_input, submit_button, form_errors %}
+
+{% block title %}Sign in · {{ app_name | default("Application") }}{% endblock %}
+{% block shell_modifier %}stripe-shell--narrow{% endblock %}
+
+{% block content %}
+{# AC-8 (chassis v0.6): System Use Notification banner. Renders only when
+   settings.system_use_notification is non-empty. NIST 800-53 AC-8 +
+   FedRAMP Moderate require this banner be displayed before granting
+   access; operator configures via SYSTEM_USE_NOTIFICATION env var. #}
+{% if settings.system_use_notification %}
+<div class="usa-alert usa-alert--warning margin-bottom-3" role="alert" aria-live="polite">
+    <div class="usa-alert__body">
+        <h3 class="usa-alert__heading">System Use Notification</h3>
+        <p class="usa-alert__text" style="white-space: pre-line;">{{ settings.system_use_notification }}</p>
+    </div>
+</div>
+{% endif %}
+<div class="stripe-card padding-4">
+    <h1 class="margin-top-0 margin-bottom-1">Sign in</h1>
+    <p class="margin-top-0 margin-bottom-3 text-base">
+        Welcome back. Enter your credentials to continue.
+    </p>
+
+    {{ form_errors(errors) }}
+
+    {# CP-B.8 fix: was action="/auth/login", which silently collided with the
+       JSON API's identical (path, method) and was therefore never reachable
+       by a real browser (always hit the JSON-only handler -> 422). #}
+    <form action="/login" method="post">
+        {{ text_input("email", "Email", type="email", value=form_data.email, errors=errors, autocomplete="email") }}
+        {{ text_input("password", "Password", type="password", errors=errors, autocomplete="current-password") }}
+        <div class="display-flex flex-justify margin-top-3">
+            <a href="/auth/register" class="font-body-sm" style="align-self: center;">Create an account</a>
+            {{ submit_button("Sign in") }}
+        </div>
+    </form>
+</div>
+{% endblock %}
