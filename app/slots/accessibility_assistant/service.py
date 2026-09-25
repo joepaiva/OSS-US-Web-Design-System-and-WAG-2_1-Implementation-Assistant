@@ -28,31 +28,87 @@ Key design decisions:
 from __future__ import annotations
 
 import json
+import os
 import re
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+import httpx
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.decorator import audited
 from app.auth.models import User
 from app.logging import get_logger
+from app.orgs.models import Membership
+from app.rbac.models import Permission, Role, role_permissions
+from app.slots.accessibility_assistant import (
+    ASSISTANT_ASK,
+    ASSISTANT_READ,
+    CONTENT_MANAGER_PERMISSIONS,
+)
+from app.slots.accessibility_assistant.crypto import CredentialEncryptionService
 from app.slots.accessibility_assistant.models import (
     FAQ,
+    FAQQuestionCategory,
+    FAQSource,
+    FAQSourceCategory,
+    InformationSource,
+    InformationSourceCategory,
+    InformationSourceTestStatus,
+    InformationSourceType,
     InteractionLog,
+    LLMFallbackConfig,
+    QuestionAlert,
     QuestionCategory,
 )
 from app.slots.accessibility_assistant.schemas import (
     AskQuestionCreate,
     Citation,
+    DocumentFolderSourceCreate,
+    FAQCreate,
     FAQRead,
+    GitHubOnlineRepoSourceCreate,
+    InformationSourceCategoryRead,
+    InformationSourceCreate,
+    InformationSourceRead,
     InteractionLogRead,
+    LocalCodeRepoSourceCreate,
+    MCPCredentials,
+    MCPServerSourceCreate,
+    QuestionAlertRead,
     QuestionCategoryRead,
     QuestionResponse,
     RateInteractionUpdate,
 )
 
 log = get_logger("slots.accessibility_assistant")
+
+# The four information source types supported by the platform (FR-011),
+# with the form-variant hint the client uses to render the right form.
+SOURCE_TYPES: list[dict[str, str]] = [
+    {
+        "source_type": InformationSourceType.LOCAL_CODE_REPO.value,
+        "label": "Local Code Repo",
+        "form_variant": "folder_picker",
+    },
+    {
+        "source_type": InformationSourceType.GITHUB_ONLINE_REPO.value,
+        "label": "GitHub/Online Repo",
+        "form_variant": "url_and_credential",
+    },
+    {
+        "source_type": InformationSourceType.DOCUMENT_FOLDER.value,
+        "label": "Document Folder",
+        "form_variant": "folder_picker",
+    },
+    {
+        "source_type": InformationSourceType.MCP_SERVER.value,
+        "label": "MCP Server",
+        "form_variant": "server_address_and_credential",
+    },
+]
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -83,6 +139,53 @@ class ContentBlocked(Exception):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(reason)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# v0.2 custom exceptions (FR-007 through FR-017)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class DuplicateCategoryName(Exception):
+    """Raised when a category name already exists within the org scope."""
+
+
+class InformationSourceCategoryNotFound(Exception):
+    pass
+
+
+class InformationSourceNotFound(Exception):
+    pass
+
+
+class SourceTestFailed(Exception):
+    """Raised when a connectivity/read-access test fails (FR-012..FR-014)."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
+
+
+class FAQValidationError(Exception):
+    """Raised when an FAQ submission references an unresolvable id, or is
+    otherwise structurally invalid (T-006)."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
+
+
+class QuestionAlertNotFound(Exception):
+    pass
+
+
+class LLMFallbackConfigNotFound(Exception):
+    pass
+
+
+class NotAnOrgMember(Exception):
+    """Raised when a Content Manager designation targets a user who is not
+    a member of the current org."""
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -208,20 +311,10 @@ async def list_faqs_by_category(
         .order_by(FAQ.id)
     )
     faqs = result.scalars().all()
-    return [
-        FAQRead(
-            id=f.id,
-            org_id=f.org_id,
-            question_category_id=f.question_category_id,
-            question=f.question,
-            answer=f.answer,
-            reasoning=f.reasoning,
-            citations=_parse_citations(f.citations_json),
-            created_at=f.created_at,
-            updated_at=f.updated_at,
-        )
-        for f in faqs
-    ]
+    # v0.2: delegates to to_faq_read (defined later in this module) so
+    # every FAQ read surface — v0.1's category-scoped browse and v0.2's
+    # direct create/get — reports the same full multi-select associations.
+    return [await to_faq_read(session, f) for f in faqs]
 
 
 async def get_faq(session: AsyncSession, faq_id: int) -> FAQRead:
@@ -230,17 +323,7 @@ async def get_faq(session: AsyncSession, faq_id: int) -> FAQRead:
     faq = result.scalar_one_or_none()
     if faq is None:
         raise FAQNotFound(faq_id)
-    return FAQRead(
-        id=faq.id,
-        org_id=faq.org_id,
-        question_category_id=faq.question_category_id,
-        question=faq.question,
-        answer=faq.answer,
-        reasoning=faq.reasoning,
-        citations=_parse_citations(faq.citations_json),
-        created_at=faq.created_at,
-        updated_at=faq.updated_at,
-    )
+    return await to_faq_read(session, faq)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -550,3 +633,1024 @@ async def list_org_interactions(
     )
     entries = result.scalars().all()
     return [_to_interaction_log_read(e) for e in entries]
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# v0.2 increment — FR-007 through FR-017
+# ═════════════════════════════════════════════════════════════════════════
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Content Manager role provisioning (supporting infrastructure)
+#
+# The chassis ships exactly two roles ("admin", "user" — app/rbac/service.py
+# seed_chassis_rbac) and app/admin/routes.py's own role picker is hardcoded
+# to {"user", "admin"}. Both are chassis-owned and immutable (CONSTITUTION
+# Extension Model). REQUIREMENTS.md's "Content Manager" persona (FR-011,
+# FR-013, FR-014, FR-016, FR-017) needs an intermediate permission tier that
+# neither chassis role provides. Role/Permission/role_permissions are plain,
+# slot-writable data tables (the whole point of the permission REGISTRY
+# extension point), so this slot provisions its own "content_manager" role
+# directly against them — no chassis code is modified.
+# ────────────────────────────────────────────────────────────────────────
+
+
+async def ensure_content_manager_role(session: AsyncSession) -> Role:
+    """Get-or-create the "content_manager" role and keep its permission
+    grants in sync with CONTENT_MANAGER_PERMISSIONS. Idempotent — safe to
+    call on every use (mirrors app.rbac.service.seed_chassis_rbac's own
+    idempotent get-or-create pattern)."""
+    result = await session.execute(select(Role).where(Role.name == "content_manager"))
+    role = result.scalar_one_or_none()
+    if role is None:
+        role = Role(
+            name="content_manager",
+            description="Accessibility Assistant Content Manager (slot-provisioned).",
+        )
+        session.add(role)
+        await session.flush()
+
+    perm_result = await session.execute(
+        select(Permission).where(Permission.name.in_(CONTENT_MANAGER_PERMISSIONS))
+    )
+    perms = perm_result.scalars().all()
+    for perm in perms:
+        existing = await session.execute(
+            select(role_permissions.c.role_id).where(
+                role_permissions.c.role_id == role.id,
+                role_permissions.c.permission_id == perm.id,
+            )
+        )
+        if existing.scalar_one_or_none() is None:
+            await session.execute(
+                role_permissions.insert().values(role_id=role.id, permission_id=perm.id)
+            )
+    await session.flush()
+    return role
+
+
+@audited(
+    "assistant.content_manager_assigned",
+    entity_type="membership",
+    capture_details=lambda membership: {
+        "user_id": membership.user_id,
+        "org_id": membership.org_id,
+    },
+)
+async def assign_content_manager(
+    session: AsyncSession, org_id: int, target_user_id: int
+) -> Membership:
+    """Designate `target_user_id` as a Content Manager within `org_id`.
+
+    Raises NotAnOrgMember if the target user has no membership in this org.
+    """
+    result = await session.execute(
+        select(Membership).where(
+            Membership.org_id == org_id, Membership.user_id == target_user_id
+        )
+    )
+    membership = result.scalar_one_or_none()
+    if membership is None:
+        raise NotAnOrgMember(target_user_id)
+
+    role = await ensure_content_manager_role(session)
+    membership.role_id = role.id
+    await session.flush()
+    return membership
+
+
+async def _ensure_baseline_role_grants(session: AsyncSession) -> None:
+    """Grant assistant:read/assistant:ask to the chassis "user" role.
+
+    PRE-EXISTING GAP found while building v0.2: app.rbac.service.seed_chassis_rbac
+    (chassis-owned, immutable) only grants USERS_READ/ORGS_READ to the "user"
+    role by default. Without this, a genuine non-admin end user (chassis role
+    "user" — the only non-admin role the platform ships) could never use the
+    self-service assistant at all, which contradicts FR-001's own stated
+    purpose. There is no chassis extension point for additional default-role
+    grants, so this slot performs the grant itself, idempotently, against the
+    same plain Role/Permission/role_permissions tables used above.
+
+    Deliberately NOT cached behind a "run once per process" flag: an earlier
+    version of this function short-circuited after its first successful run,
+    which is unsafe here because `role_permissions` can be reset independently
+    of the process (the chassis test suite's `clean_db` fixture TRUNCATEs and
+    re-seeds it before every test; an operator could analogously reset roles
+    in production) — a stale "already ensured" flag would then silently skip
+    re-granting against the fresh, empty table. Each call is 1-2 cheap
+    indexed SELECTs plus conditional inserts — negligible next to the rest of
+    a request's cost, and correctness matters more here than the micro-
+    optimization.
+
+    ACKNOWLEDGED LIMITATION: this call happens inside the tiered-answering
+    service functions, which only run AFTER the route's `requires(ASSISTANT_ASK)`
+    dependency has already checked the permission. So the very first
+    assistant:ask/answer request ever made by a genuinely non-admin "user"-role
+    member (before any admin-role user in the org has ever asked a question,
+    which is what actually triggers this grant) would still 403. There is no
+    slot extension point that runs before the chassis's own permission
+    dependency, so closing that first-request edge case is out of this
+    increment's reach without a chassis change.
+    """
+    result = await session.execute(select(Role).where(Role.name == "user"))
+    user_role = result.scalar_one_or_none()
+    if user_role is not None:
+        perm_result = await session.execute(
+            select(Permission).where(Permission.name.in_([ASSISTANT_READ, ASSISTANT_ASK]))
+        )
+        for perm in perm_result.scalars().all():
+            existing = await session.execute(
+                select(role_permissions.c.role_id).where(
+                    role_permissions.c.role_id == user_role.id,
+                    role_permissions.c.permission_id == perm.id,
+                )
+            )
+            if existing.scalar_one_or_none() is None:
+                await session.execute(
+                    role_permissions.insert().values(
+                        role_id=user_role.id, permission_id=perm.id
+                    )
+                )
+        await session.flush()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Information Source Categories (FR-010, T-002)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@audited(
+    "assistant.information_source_category_created",
+    entity_type="information_source_category",
+    capture_details=lambda c: {"id": c.id, "name": c.name},
+)
+async def create_information_source_category(
+    session: AsyncSession, user: User, name: str, description: str | None
+) -> InformationSourceCategory:
+    """Create an information source category (FR-010).
+
+    Raises DuplicateCategoryName if a category with this name already
+    exists in the current org. The uniqueness check is performed before
+    any database write (T-002 acceptance criteria).
+    """
+    existing = await session.execute(
+        select(InformationSourceCategory).where(InformationSourceCategory.name == name)
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise DuplicateCategoryName(name)
+
+    category = InformationSourceCategory(
+        name=name, description=description, created_by_user_id=user.id
+    )
+    session.add(category)
+    await session.flush()
+    return category
+
+
+async def list_information_source_categories(
+    session: AsyncSession,
+) -> list[InformationSourceCategoryRead]:
+    """Return all information source categories in the current org (FR-010)."""
+    result = await session.execute(
+        select(InformationSourceCategory).order_by(InformationSourceCategory.name)
+    )
+    categories = result.scalars().all()
+    return [InformationSourceCategoryRead.model_validate(c) for c in categories]
+
+
+async def get_information_source_category(
+    session: AsyncSession, category_id: int
+) -> InformationSourceCategory:
+    result = await session.execute(
+        select(InformationSourceCategory).where(InformationSourceCategory.id == category_id)
+    )
+    category = result.scalar_one_or_none()
+    if category is None:
+        raise InformationSourceCategoryNotFound(category_id)
+    return category
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Information Sources (FR-011..FR-014, T-003)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def list_source_types() -> list[dict[str, str]]:
+    """Return the four supported information source types (FR-011)."""
+    return list(SOURCE_TYPES)
+
+
+def test_local_folder_access(folder_path: str) -> bool:
+    """Test read access to a local folder WITHOUT executing anything found
+    inside it (FR-012's no-execute rule). Only `Path`/`os.access` calls —
+    no subprocess, exec, or eval.
+    """
+    path = Path(folder_path)
+    return path.is_dir() and os.access(path, os.R_OK)
+
+
+async def test_github_access(github_url: str, access_token: str | None) -> bool:
+    """Test read access to a GitHub/online repo (FR-013's no-execute rule).
+
+    Performs a single read-only HTTP GET against the repo's API endpoint —
+    never clones, executes, or evaluates any repository content.
+    Network/parse failures are treated as a failed test (never raised).
+    """
+    api_url = _github_api_url(github_url)
+    if api_url is None:
+        return False
+    headers = {"Authorization": f"token {access_token}"} if access_token else {}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(api_url, headers=headers)
+        return resp.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def _github_api_url(github_url: str) -> str | None:
+    """Convert a GitHub repo URL into its REST API equivalent, e.g.
+    https://github.com/owner/repo -> https://api.github.com/repos/owner/repo.
+    Returns None if the URL is not a recognizable GitHub repo URL.
+    """
+    cleaned = github_url.strip().rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[: -len(".git")]
+    marker = "github.com/"
+    idx = cleaned.find(marker)
+    if idx == -1:
+        return None
+    path = cleaned[idx + len(marker) :]
+    parts = [p for p in path.split("/") if p]
+    if len(parts) < 2:
+        return None
+    owner, repo = parts[0], parts[1]
+    return f"https://api.github.com/repos/{owner}/{repo}"
+
+
+async def test_mcp_connectivity(
+    mcp_server_address: str, credentials: MCPCredentials | None
+) -> bool:
+    """Test connectivity to an MCP server via the chassis MCP client
+    (app.mcp.client — the same SDK wrapper app/mcp/service.py uses),
+    rather than re-implementing the MCP protocol in this slot.
+    """
+    credential = None
+    if credentials is not None:
+        credential = credentials.api_key or credentials.password
+    try:
+        from app.mcp.client import MCPClientError  # noqa: PLC0415
+        from app.mcp.client import list_tools as _mcp_list_tools  # noqa: PLC0415
+
+        await _mcp_list_tools(
+            url=mcp_server_address, credential=credential, timeout_seconds=10.0
+        )
+        return True
+    except MCPClientError:
+        return False
+    except Exception:  # pragma: no cover - defensive: never let a test crash a route
+        log.error("assistant.mcp_test_unexpected_error", address=mcp_server_address)
+        return False
+
+
+async def _run_connectivity_test(payload: InformationSourceCreate) -> bool:
+    """Dispatch to the right connectivity test for `payload`'s source_type."""
+    if isinstance(payload, LocalCodeRepoSourceCreate):
+        return test_local_folder_access(payload.folder_path)
+    if isinstance(payload, MCPServerSourceCreate):
+        return await test_mcp_connectivity(payload.mcp_server_address, payload.credentials)
+    if isinstance(payload, GitHubOnlineRepoSourceCreate):
+        return await test_github_access(payload.github_url, payload.access_token)
+    # DocumentFolderSourceCreate
+    return test_local_folder_access(payload.folder_path)
+
+
+@audited(
+    "assistant.information_source_created",
+    entity_type="information_source",
+    capture_details=lambda s: {"id": s.id, "name": s.name, "source_type": s.source_type},
+)
+async def create_information_source(
+    session: AsyncSession, user: User, payload: InformationSourceCreate
+) -> InformationSource:
+    """Create an information source (FR-011..FR-014).
+
+    The connectivity/read-access test runs synchronously as part of this
+    call — the source is only persisted if the test succeeds (FR-012's
+    "on failure ... the source is not saved until a successful test", and
+    FR-014's "requires successful Test MCP before save"). Raises
+    InformationSourceCategoryNotFound if category_id doesn't resolve in
+    this org, or SourceTestFailed if the connectivity test fails.
+    """
+    await get_information_source_category(session, payload.category_id)
+
+    ok = await _run_connectivity_test(payload)
+    if not ok:
+        raise SourceTestFailed(
+            f"Connectivity/read-access test failed for source type {payload.source_type!r}."
+        )
+
+    credentials_encrypted: str | None = None
+    folder_path: str | None = None
+    github_url: str | None = None
+    mcp_server_address: str | None = None
+
+    if isinstance(payload, LocalCodeRepoSourceCreate | DocumentFolderSourceCreate):
+        folder_path = payload.folder_path
+    elif isinstance(payload, GitHubOnlineRepoSourceCreate):
+        github_url = payload.github_url
+        if payload.access_token:
+            credentials_encrypted = CredentialEncryptionService.encrypt(
+                {"access_token": payload.access_token}
+            )
+    else:
+        mcp_server_address = payload.mcp_server_address
+        if payload.credentials is not None:
+            creds_dict = payload.credentials.model_dump(exclude_none=True)
+            if creds_dict:
+                credentials_encrypted = CredentialEncryptionService.encrypt(creds_dict)
+
+    source = InformationSource(
+        category_id=payload.category_id,
+        name=payload.name,
+        source_type=payload.source_type,
+        folder_path=folder_path,
+        github_url=github_url,
+        mcp_server_address=mcp_server_address,
+        credentials_encrypted=credentials_encrypted,
+        test_status=InformationSourceTestStatus.SUCCESS.value,
+        last_tested_at=datetime.now(UTC),
+        created_by_user_id=user.id,
+    )
+    session.add(source)
+    await session.flush()
+    return source
+
+
+def _to_information_source_read(source: InformationSource) -> InformationSourceRead:
+    return InformationSourceRead(
+        id=source.id,
+        org_id=source.org_id,
+        category_id=source.category_id,
+        name=source.name,
+        source_type=source.source_type,
+        folder_path=source.folder_path,
+        github_url=source.github_url,
+        mcp_server_address=source.mcp_server_address,
+        credential_set=source.credentials_encrypted is not None,
+        test_status=source.test_status,
+        last_tested_at=source.last_tested_at,
+        created_by_user_id=source.created_by_user_id,
+        created_at=source.created_at,
+        updated_at=source.updated_at,
+    )
+
+
+async def list_information_sources(session: AsyncSession) -> list[InformationSourceRead]:
+    """Return all information sources in the current org (FR-011)."""
+    result = await session.execute(select(InformationSource).order_by(InformationSource.name))
+    sources = result.scalars().all()
+    return [_to_information_source_read(s) for s in sources]
+
+
+async def get_information_source(session: AsyncSession, source_id: int) -> InformationSource:
+    result = await session.execute(
+        select(InformationSource).where(InformationSource.id == source_id)
+    )
+    source = result.scalar_one_or_none()
+    if source is None:
+        raise InformationSourceNotFound(source_id)
+    return source
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Question Categories — creation (FR-015, T-005)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@audited(
+    "assistant.question_category_created",
+    entity_type="question_category",
+    capture_details=lambda c: {"id": c.id, "name": c.name},
+)
+async def create_question_category(
+    session: AsyncSession, user: User, name: str, description: str | None
+) -> QuestionCategory:
+    """Create a question category (FR-015).
+
+    Uniqueness is case-insensitive within the current org (T-005
+    implementation notes), checked before any database write.
+    """
+    existing = await session.execute(
+        select(QuestionCategory).where(func.lower(QuestionCategory.name) == name.lower())
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise DuplicateCategoryName(name)
+
+    category = QuestionCategory(name=name, description=description, created_by_user_id=user.id)
+    session.add(category)
+    await session.flush()
+    return category
+
+
+# ────────────────────────────────────────────────────────────────────────
+# FAQ — manual creation (FR-016, T-006)
+# ────────────────────────────────────────────────────────────────────────
+
+
+async def _resolve_ids_in_org(
+    session: AsyncSession, model: type[Any], ids: list[int], label: str
+) -> None:
+    """Raise FAQValidationError naming `label` if any of `ids` doesn't
+    resolve to a row visible in the current org (TenantScoped auto-filter
+    handles the org scoping)."""
+    if not ids:
+        raise FAQValidationError(f"at least one {label} is required")
+    result = await session.execute(select(model.id).where(model.id.in_(ids)))
+    found = {row[0] for row in result.all()}
+    missing = set(ids) - found
+    if missing:
+        raise FAQValidationError(f"unknown {label} id(s): {sorted(missing)}")
+
+
+@audited(
+    "assistant.faq_created",
+    entity_type="faq",
+    capture_details=lambda f: {"id": f.id, "question": f.question[:80]},
+)
+async def create_faq(session: AsyncSession, user: User, payload: FAQCreate) -> FAQ:
+    """Manually create an FAQ with multi-select category/source associations
+    (FR-016). Raises FAQValidationError if any referenced id is unresolvable
+    within the current org. All writes happen in a single transaction.
+    """
+    await _resolve_ids_in_org(
+        session, QuestionCategory, payload.question_category_ids, "question category"
+    )
+    await _resolve_ids_in_org(
+        session,
+        InformationSourceCategory,
+        payload.source_category_ids,
+        "source category",
+    )
+    await _resolve_ids_in_org(session, InformationSource, payload.source_ids, "source")
+
+    faq = FAQ(
+        # Backward-compatible single FK — set to the first selected category
+        # so v0.1's category-scoped FAQ matching keeps working unmodified.
+        question_category_id=payload.question_category_ids[0],
+        question=payload.question,
+        answer=payload.answer,
+        created_by_user_id=user.id,
+    )
+    session.add(faq)
+    await session.flush()
+
+    session.add_all(
+        FAQQuestionCategory(faq_id=faq.id, question_category_id=qc_id)
+        for qc_id in payload.question_category_ids
+    )
+    session.add_all(
+        FAQSourceCategory(faq_id=faq.id, source_category_id=sc_id)
+        for sc_id in payload.source_category_ids
+    )
+    session.add_all(
+        FAQSource(faq_id=faq.id, source_id=s_id) for s_id in payload.source_ids
+    )
+    await session.flush()
+    return faq
+
+
+async def _faq_associated_ids(
+    session: AsyncSession, faq_id: int, junction: type[Any], column_name: str
+) -> list[int]:
+    column = getattr(junction, column_name)
+    result = await session.execute(select(column).where(junction.faq_id == faq_id))
+    return [row[0] for row in result.all()]
+
+
+async def to_faq_read(session: AsyncSession, faq: FAQ) -> FAQRead:
+    """Build the full FAQRead for `faq`, including v0.2's multi-select
+    association lists (falls back gracefully for pre-v0.2 rows)."""
+    question_category_ids = await _faq_associated_ids(
+        session, faq.id, FAQQuestionCategory, "question_category_id"
+    )
+    if not question_category_ids and faq.question_category_id is not None:
+        question_category_ids = [faq.question_category_id]
+    source_category_ids = await _faq_associated_ids(
+        session, faq.id, FAQSourceCategory, "source_category_id"
+    )
+    source_ids = await _faq_associated_ids(session, faq.id, FAQSource, "source_id")
+
+    return FAQRead(
+        id=faq.id,
+        org_id=faq.org_id,
+        question_category_id=faq.question_category_id,
+        question=faq.question,
+        answer=faq.answer,
+        reasoning=faq.reasoning,
+        citations=_parse_citations(faq.citations_json),
+        created_at=faq.created_at,
+        updated_at=faq.updated_at,
+        question_category_ids=question_category_ids,
+        source_category_ids=source_category_ids,
+        source_ids=source_ids,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Tiered question answering (FR-007, FR-008, T-015, T-016)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _normalize_for_slug(text: str) -> str:
+    """Lowercase + strip everything but alphanumerics, for exact-slug
+    comparison (FR-007's "exact-match slug" tier)."""
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+async def _faq_match_tiered(
+    session: AsyncSession, question_text: str
+) -> tuple[FAQ, str] | None:
+    """Attempt to match `question_text` against every FAQ in the current
+    org, in FR-007's stated priority order: exact-match slug -> keyword
+    set -> regex pattern. Returns (faq, match_kind) or None.
+    """
+    result = await session.execute(select(FAQ))
+    faqs = result.scalars().all()
+    if not faqs:
+        return None
+
+    # Tier 1: exact-match slug.
+    target_slug = _normalize_for_slug(question_text)
+    for faq in faqs:
+        if _normalize_for_slug(faq.question) == target_slug:
+            return faq, "exact_slug"
+
+    # Tier 2: keyword-set overlap (best score wins; score must be > 0).
+    question_words = set(question_text.lower().split())
+    best_faq: FAQ | None = None
+    best_score = 0
+    for faq in faqs:
+        score = len(set(faq.question.lower().split()) & question_words)
+        if score > best_score:
+            best_score = score
+            best_faq = faq
+    if best_faq is not None and best_score > 0:
+        return best_faq, "keyword_set"
+
+    # Tier 3: regex pattern (only FAQs with an explicit match_pattern).
+    for faq in faqs:
+        if not faq.match_pattern:
+            continue
+        try:
+            if re.search(faq.match_pattern, question_text, re.IGNORECASE):
+                return faq, "regex"
+        except re.error:
+            continue
+
+    return None
+
+
+def _script_tier_lookup() -> None:
+    """The "applicable Python scripts executed against configured
+    information sources" tier described in T-015.
+
+    DELIBERATELY A NO-OP. DESIGN.md/REQUIREMENTS.md never define a script
+    storage or authoring mechanism for information sources, and FR-012/
+    FR-013's own "Critical Security Control" states a STRICT no-execute
+    rule: code in a connected source is NEVER executed by the system. Per
+    CLAUDE.md, the CONSTITUTION's security invariants are supreme over a
+    requirement's literal wording when the two conflict — building real
+    arbitrary script execution against customer-configured sources would
+    violate that invariant with no safe design specified anywhere in the
+    Build Package. This function preserves the THREE-TIER PIPELINE SHAPE
+    (FAQ -> script -> LLM) and its observable behavior (no script tier is
+    ever "applicable" because none can be safely authored in this
+    increment) without executing anything. Flagged explicitly here and in
+    the v0.2 completion report as a spec self-contradiction resolved in
+    favor of the security invariant.
+    """
+    return None
+
+
+@audited(
+    "assistant.question_resolved",
+    entity_type="interaction_log",
+    capture_details=lambda result: {
+        "tier": result["tier"],
+        "interaction_log_id": result["interaction_log_id"],
+        "alert_sent": result["alert_sent"],
+    },
+)
+async def resolve_question_tiered(
+    session: AsyncSession,
+    user: User,
+    org_id: int,
+    question_text: str,
+    question_category_id: int | None,
+    session_id: str | None,
+    *,
+    dispatch_alert_on_unanswerable: bool,
+) -> dict[str, Any]:
+    """Shared tiered-resolution pipeline backing both T-015 and T-016's
+    endpoints: deterministic FAQ match -> (inert) script tier -> LLM
+    fallback (mode selected via LLMFallbackConfig) -> unanswerable.
+
+    Returns a dict with keys: tier, response_text, reasoning, citations,
+    llm_invoked, alert_sent, interaction_log_id. Always persists an
+    InteractionLog row (FR-006) regardless of which tier resolved it.
+    """
+    _check_content(question_text)
+    await _ensure_baseline_role_grants(session)
+
+    history: list[dict[str, str]] = []
+    if session_id:
+        history = await _get_conversation_history(session, session_id, user.id)
+
+    tier = "unanswerable"
+    response_text = ""
+    reasoning = ""
+    citations: list[Citation] = []
+    llm_invoked = False
+    alert_sent = False
+
+    # Tier 1: deterministic FAQ match (FR-007).
+    match = await _faq_match_tiered(session, question_text)
+    if match is not None:
+        faq, _match_kind = match
+        response_text = faq.answer
+        reasoning = faq.reasoning
+        citations = _parse_citations(faq.citations_json)
+        tier = "faq"
+    else:
+        # Tier 2: script execution against configured sources — inert (see
+        # _script_tier_lookup's docstring).
+        _script_tier_lookup()
+
+        # Tier 3: LLM fallback (FR-008), mode selected via FR-009 config.
+        mode = await _resolve_llm_fallback_mode(session, question_category_id)
+        llm_invoked = True
+        try:
+            response_text, reasoning, citations = await _call_llm_tiered(
+                session=session,
+                question=question_text,
+                history=history,
+                org_id=org_id,
+                mode=mode,
+            )
+            tier = "llm_retrieval_augmented" if mode == "retrieval_augmented" else "llm_frontier"
+        except _UnanswerableError:
+            tier = "unanswerable"
+            llm_invoked = False
+
+    if tier == "unanswerable" and dispatch_alert_on_unanswerable:
+        await dispatch_unanswerable_alert(session, org_id, user, question_text)
+        alert_sent = True
+
+    log_entry = InteractionLog(
+        user_id=user.id,
+        question_category_id=question_category_id,
+        session_id=session_id,
+        question_text=question_text,
+        response_text=response_text,
+        reasoning=reasoning,
+        sources_json=_serialise_citations(citations),
+        rating=None,
+    )
+    session.add(log_entry)
+    await session.flush()
+
+    return {
+        "tier": tier,
+        "response_text": response_text,
+        "reasoning": reasoning,
+        "citations": citations,
+        "llm_invoked": llm_invoked,
+        "alert_sent": alert_sent,
+        "interaction_log_id": log_entry.id,
+    }
+
+
+class _UnanswerableError(Exception):
+    """Internal signal: the LLM fallback tier could not produce a sufficient
+    response (LLM unavailable or a transport failure)."""
+
+
+async def _resolve_llm_fallback_mode(
+    session: AsyncSession, question_category_id: int | None
+) -> str:
+    """Resolve the LLM fallback mode for this question (FR-009).
+
+    The request carries only a question_category_id (no source_category_id
+    — DESIGN.md's question-submission contract doesn't include one), so
+    when a question category is given this looks up ANY configured
+    LLMFallbackConfig row for that question category in the current org
+    (first match wins if more than one source category has been
+    configured for it). Falls back to "frontier_general_knowledge" — the
+    mode that needs no information-source grounding — when nothing is
+    configured or no category was given.
+    """
+    if question_category_id is None:
+        return "frontier_general_knowledge"
+    result = await session.execute(
+        select(LLMFallbackConfig)
+        .where(LLMFallbackConfig.question_category_id == question_category_id)
+        .order_by(LLMFallbackConfig.id)
+        .limit(1)
+    )
+    config = result.scalar_one_or_none()
+    if config is None:
+        return "frontier_general_knowledge"
+    return config.mode
+
+
+async def _call_llm_tiered(
+    session: AsyncSession,
+    question: str,
+    history: list[dict[str, str]],
+    org_id: int,
+    mode: str,
+) -> tuple[str, str, list[Citation]]:
+    """Call the chassis LLM service, grounded against configured
+    information sources when mode == "retrieval_augmented" (FR-009).
+
+    Raises _UnanswerableError if the LLM tier cannot produce a response
+    (no key configured, or a transport failure) — the caller treats that
+    as "both tiers exhausted" (FR-008).
+    """
+    from app.llm.service import LLMKeyUnavailable, complete  # noqa: PLC0415
+    from app.llm.transport import LLMError  # noqa: PLC0415
+
+    grounding = ""
+    if mode == "retrieval_augmented":
+        grounding = await _build_grounding_context(session)
+
+    system_prompt = (
+        "You are an accessibility assistant. Answer the user's question about "
+        "accessibility clearly and helpfully. Provide: "
+        "1) An expository response, "
+        "2) Your reasoning, "
+        "3) Any relevant source citations in JSON format. "
+        "Format your response as JSON with keys: "
+        '"response", "reasoning", "citations" (array of {"source_name", "hyperlink"}).'
+    )
+    if grounding:
+        system_prompt += (
+            "\n\nGround your answer in the following configured information "
+            f"sources when relevant:\n{grounding}"
+        )
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": question})
+
+    try:
+        result = await complete(
+            session=session,
+            provider="openai",
+            model="gpt-4o-mini",
+            messages=messages,
+            org_id=org_id,
+        )
+    except LLMKeyUnavailable as exc:
+        log.warning("llm.key_unavailable", org_id=org_id)
+        raise _UnanswerableError("no LLM key configured") from exc
+    except LLMError as exc:
+        log.error("llm.call_failed", error=str(exc), org_id=org_id)
+        raise _UnanswerableError("LLM transport failure") from exc
+
+    content = result["choices"][0]["message"]["content"]
+    try:
+        parsed = json.loads(content)
+        response_text = str(parsed.get("response", content))
+        reasoning = str(parsed.get("reasoning", ""))
+        raw_citations = parsed.get("citations", [])
+        citations = [
+            Citation(
+                source_name=str(c.get("source_name", "")),
+                hyperlink=str(c.get("hyperlink", "")),
+            )
+            for c in raw_citations
+            if isinstance(c, dict)
+        ]
+    except (json.JSONDecodeError, KeyError, AttributeError):
+        response_text = content
+        reasoning = ""
+        citations = []
+    return response_text, reasoning, citations
+
+
+async def _build_grounding_context(session: AsyncSession) -> str:
+    """Build a short textual summary of configured information sources for
+    the retrieval-augmented prompt (FR-009). This chassis ships no vector
+    store / content-indexing pipeline, so "grounding" here is limited to
+    naming the org's configured sources and categories rather than
+    retrieving indexed source content — a bounded, honest interpretation
+    given what the Build Package actually specifies.
+    """
+    result = await session.execute(select(InformationSource).order_by(InformationSource.name))
+    sources = result.scalars().all()
+    if not sources:
+        return ""
+    lines = [f"- {s.name} ({s.source_type})" for s in sources]
+    return "\n".join(lines)
+
+
+async def answer_question_deterministic_first(
+    session: AsyncSession, user: User, payload: AskQuestionCreate, org_id: int
+) -> dict[str, Any]:
+    """T-015 (FR-007): deterministic-first question answering."""
+    result = await resolve_question_tiered(
+        session,
+        user,
+        org_id,
+        payload.question_text,
+        payload.question_category_id,
+        payload.session_id,
+        dispatch_alert_on_unanswerable=False,
+    )
+    # Simplify the 5-way tier into T-015's 3-way "source" field.
+    source = "faq" if result["tier"] == "faq" else ("llm" if result["llm_invoked"] else "script")
+    result["source"] = source
+    return result
+
+
+async def answer_question_with_fallback(
+    session: AsyncSession, user: User, payload: AskQuestionCreate, org_id: int
+) -> dict[str, Any]:
+    """T-016 (FR-008): full tiered fallback with unanswerable alerting."""
+    return await resolve_question_tiered(
+        session,
+        user,
+        org_id,
+        payload.question_text,
+        payload.question_category_id,
+        payload.session_id,
+        dispatch_alert_on_unanswerable=True,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Unanswerable-question alerts (FR-008)
+# ────────────────────────────────────────────────────────────────────────
+
+
+async def _resolve_alert_recipients(session: AsyncSession, org_id: int) -> list[User]:
+    """Return the org's Organization Administrators and Content Managers
+    (FR-008's stated alert recipients) — i.e. every member whose per-org
+    role is "admin" or "content_manager"."""
+    result = await session.execute(
+        select(User)
+        .join(Membership, Membership.user_id == User.id)
+        .join(Role, Role.id == Membership.role_id)
+        .where(Membership.org_id == org_id, Role.name.in_(["admin", "content_manager"]))
+    )
+    return list(result.scalars().all())
+
+
+async def dispatch_unanswerable_alert(
+    session: AsyncSession, org_id: int, user: User, question_text: str
+) -> QuestionAlert:
+    """Create a QuestionAlert row and notify every Organization
+    Administrator / Content Manager in the org (FR-008)."""
+    from app.notifications.service import notify  # noqa: PLC0415
+
+    alert = QuestionAlert(
+        alert_type="unanswerable_question",
+        question_text=question_text,
+        submitting_user_id=user.id,
+        submitting_user_name=user.full_name or user.email,
+    )
+    session.add(alert)
+    await session.flush()
+
+    recipients = await _resolve_alert_recipients(session, org_id)
+    for recipient in recipients:
+        try:
+            await notify(
+                session=session,
+                user_id=recipient.id,
+                title="No answer available for a submitted question",
+                body=(
+                    f"{alert.submitting_user_name} asked a question that could not "
+                    f"be answered: {question_text}"
+                ),
+                level="warning",
+                org_id=org_id,
+            )
+        except Exception:  # pragma: no cover - notification failure must not break the flow
+            log.error("assistant.alert_notify_failed", recipient_id=recipient.id)
+    return alert
+
+
+def _to_alert_read(alert: QuestionAlert) -> QuestionAlertRead:
+    return QuestionAlertRead(
+        id=alert.id,
+        org_id=alert.org_id,
+        alert_type=alert.alert_type,
+        question_text=alert.question_text,
+        submitting_user_name=alert.submitting_user_name,
+        acknowledged=alert.acknowledged,
+        acknowledged_at=alert.acknowledged_at,
+        created_at=alert.created_at,
+    )
+
+
+async def list_question_alerts(session: AsyncSession) -> list[QuestionAlertRead]:
+    """Return unanswerable-question alerts for the current org (FR-008)."""
+    result = await session.execute(select(QuestionAlert).order_by(QuestionAlert.created_at.desc()))
+    alerts = result.scalars().all()
+    return [_to_alert_read(a) for a in alerts]
+
+
+@audited(
+    "assistant.question_alert_acknowledged",
+    entity_type="question_alert",
+    capture_details=lambda a: {"id": a.id},
+)
+async def acknowledge_question_alert(
+    session: AsyncSession, user: User, alert_id: int
+) -> QuestionAlert:
+    """Mark an alert acknowledged (FR-008). Raises QuestionAlertNotFound."""
+    result = await session.execute(select(QuestionAlert).where(QuestionAlert.id == alert_id))
+    alert = result.scalar_one_or_none()
+    if alert is None:
+        raise QuestionAlertNotFound(alert_id)
+    alert.acknowledged = True
+    alert.acknowledged_by_user_id = user.id
+    alert.acknowledged_at = datetime.now(UTC)
+    await session.flush()
+    return alert
+
+
+# ────────────────────────────────────────────────────────────────────────
+# LLM Fallback Configuration (FR-009, T-017)
+# ────────────────────────────────────────────────────────────────────────
+
+
+async def list_llm_fallback_configs(session: AsyncSession) -> list[LLMFallbackConfig]:
+    """Return all LLM fallback configs for the current org (FR-009)."""
+    result = await session.execute(select(LLMFallbackConfig).order_by(LLMFallbackConfig.id))
+    return list(result.scalars().all())
+
+
+async def get_llm_fallback_config(
+    session: AsyncSession, source_category_id: int, question_category_id: int
+) -> LLMFallbackConfig:
+    result = await session.execute(
+        select(LLMFallbackConfig).where(
+            LLMFallbackConfig.source_category_id == source_category_id,
+            LLMFallbackConfig.question_category_id == question_category_id,
+        )
+    )
+    config = result.scalar_one_or_none()
+    if config is None:
+        raise LLMFallbackConfigNotFound((source_category_id, question_category_id))
+    return config
+
+
+@audited(
+    "assistant.llm_fallback_config_upserted",
+    entity_type="llm_fallback_config",
+    capture_details=lambda c: {
+        "source_category_id": c.source_category_id,
+        "question_category_id": c.question_category_id,
+        "mode": c.mode,
+    },
+)
+async def upsert_llm_fallback_config(
+    session: AsyncSession,
+    source_category_id: int,
+    question_category_id: int,
+    mode: str,
+) -> LLMFallbackConfig:
+    """Create or update the fallback mode for (source_category_id,
+    question_category_id) (FR-009). Raises InformationSourceCategoryNotFound
+    or CategoryNotFound if either id doesn't resolve in the current org.
+    """
+    await get_information_source_category(session, source_category_id)
+    await get_question_category(session, question_category_id)
+
+    try:
+        config = await get_llm_fallback_config(
+            session, source_category_id, question_category_id
+        )
+        config.mode = mode
+    except LLMFallbackConfigNotFound:
+        config = LLMFallbackConfig(
+            source_category_id=source_category_id,
+            question_category_id=question_category_id,
+            mode=mode,
+        )
+        session.add(config)
+    await session.flush()
+    return config
+
+
+async def delete_llm_fallback_config(
+    session: AsyncSession, source_category_id: int, question_category_id: int
+) -> None:
+    """Delete a fallback config (FR-009). Raises LLMFallbackConfigNotFound."""
+    config = await get_llm_fallback_config(session, source_category_id, question_category_id)
+    await session.delete(config)
+    await session.flush()

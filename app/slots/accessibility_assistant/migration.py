@@ -1,11 +1,33 @@
-"""Accessibility Assistant slot — Alembic migration body.
+# ruff: noqa: F821
+# mypy: ignore-errors
+# F821 / mypy name-defined errors are suppressed file-wide: `op`/`sa` are
+# injected by the Alembic migration runner into the real versions/ files
+# this document mirrors (see the module docstring) and are deliberately
+# not imported here, so this reference copy is not standalone-valid
+# Python. Pre-existing from the v0.1 increment; silenced here (rather than
+# left as noise) while touching this file for the v0.2 update.
+"""Accessibility Assistant slot — Alembic migration body (cumulative).
 
-upgrade() creates the three slot tables:
+This file is a readable, cumulative reference copy of the slot's full
+schema-as-DDL — it is NOT imported or executed by Alembic (see
+`migrations/versions/0015_accessibility_assistant_slot.py` and
+`migrations/versions/0016_accessibility_assistant_slot_v0_2.py`, which are
+the real, independently-numbered, additive revisions Alembic runs).
+
+v0.1 (migration 0015) created the three original slot tables:
   - aa_question_categories
   - aa_faqs
   - aa_interaction_logs
 
-downgrade() drops them in reverse dependency order.
+v0.2 (migration 0016) added, additively (see that file for the exact,
+authoritative DDL):
+  - two nullable columns on aa_question_categories / aa_faqs
+  - aa_information_source_categories, aa_information_sources
+  - aa_faq_question_categories, aa_faq_source_categories, aa_faq_sources
+  - aa_llm_fallback_configs
+  - aa_question_alerts
+
+downgrade() drops everything in reverse dependency order.
 
 Columns match models.py exactly. The `op` and `sa` names are injected
 by the Alembic migration runner — do not import them here.
