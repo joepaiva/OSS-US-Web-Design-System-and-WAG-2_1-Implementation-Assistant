@@ -1,0 +1,13 @@
+# Preinstall the chassis toolchain BEFORE the Copilot cloud coding agent runs.
+# The job MUST be named exactly copilot-setup-steps. If a step fails the agent proceeds
+# anyway — enforce correctness via a required status check on the agent's PR.
+name: Copilot setup steps
+on: workflow_dispatch
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run pytest -q || true

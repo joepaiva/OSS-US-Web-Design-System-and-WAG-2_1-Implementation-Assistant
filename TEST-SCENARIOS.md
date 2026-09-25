@@ -1156,11 +1156,174 @@ Each test scenario MUST be classified as one of:
 - **When:** The Platform Administrator views the interaction logs.
 - **Then:** Logs are presented in read-only mode with no edit, delete, or alter controls available.
 ## 4. PERSISTENCE TEST SCENARIOS (SQLALCHEMY)
-*Pending — system-derived from DESIGN.md#5. PERSISTENCE & DATA ACCESS (SQLALCHEMY)*
+- **TS-PERS-001** — User (requirements: unlinked)
+  - Given no User exists / When creating a User without id / Then creation fails with required field error
+  - Given no User exists / When creating a User without name / Then creation fails with required field error
+  - Given no User exists / When creating a User without email / Then creation fails with required field error
+  - Given no User exists / When creating a User without role / Then creation fails with required field error
+  - Given no User exists / When creating a User without created_at / Then creation fails with required field error
+  - Given no User exists / When creating a User without updated_at / Then creation fails with required field error
+  - Given no User exists / When creating a User with role not in (platform_admin, org_admin, content_manager, end_user) / Then creation fails with enum validation error
+  - Given no User exists / When creating a User with valid id, name, email, role, and timestamps / Then User is persisted with organization_id as null
+  - Given no User exists / When creating a User with valid required fields and organization_id / Then User is persisted with organization_id set
 
+- **TS-PERS-002** — Organization (requirements: unlinked)
+  - Given no Organization exists / When creating an Organization without id / Then creation fails with required field error
+  - Given no Organization exists / When creating an Organization without name / Then creation fails with required field error
+  - Given no Organization exists / When creating an Organization without created_at / Then creation fails with required field error
+  - Given no Organization exists / When creating an Organization without updated_at / Then creation fails with required field error
+  - Given no Organization exists / When creating a valid Organization / Then Organization is persisted
+
+- **TS-PERS-003** — InformationSourceCategory (requirements: unlinked)
+  - Given no InformationSourceCategory exists / When creating one without id / Then creation fails with required field error
+  - Given no InformationSourceCategory exists / When creating one without name / Then creation fails with required field error
+  - Given no InformationSourceCategory exists / When creating one without created_by / Then creation fails with required field error
+  - Given no InformationSourceCategory exists / When creating one without created_at / Then creation fails with required field error
+  - Given no InformationSourceCategory exists / When creating one without updated_at / Then creation fails with required field error
+  - Given no InformationSourceCategory exists / When creating one with valid required fields and organization_id / Then category is persisted with organization_id set
+  - Given no InformationSourceCategory exists / When creating one with valid required fields and no organization_id / Then category is persisted with organization_id as null
+
+- **TS-PERS-004** — InformationSource (requirements: unlinked)
+  - Given no InformationSource exists / When creating one without id / Then creation fails with required field error
+  - Given no InformationSource exists / When creating one without name / Then creation fails with required field error
+  - Given no InformationSource exists / When creating one without category_id / Then creation fails with required field error
+  - Given no InformationSource exists / When creating one without source_type / Then creation fails with required field error
+  - Given no InformationSource exists / When creating one without credentials_encrypted / Then creation fails with required field error
+  - Given no InformationSource exists / When creating one without no_execute_triggered / Then creation fails with required field error
+  - Given no InformationSource exists / When creating one without created_by / Then creation fails with required field error
+  - Given no InformationSource exists / When creating one without created_at / Then creation fails with required field error
+  - Given no InformationSource exists / When creating one without updated_at / Then creation fails with required field error
+  - Given no InformationSource exists / When creating one with source_type not in (github, mcp_server, other) / Then creation fails with enum validation error
+  - Given no InformationSource exists / When creating one with valid required fields and organization_id / Then source is persisted with organization_id set
+  - Given no InformationSource exists / When creating one with valid required fields and no organization_id / Then source is persisted with organization_id as null
+  - Given an InformationSource exists with credentials_encrypted / When reading the source / Then credentials_encrypted is returned as stored blob data
+  - Given an InformationSource exists with no_execute_triggered=false / When updating no_execute_triggered to true / Then updated_at is modified and no_execute_triggered reflects the change
+
+- **TS-PERS-005** — QuestionCategory (requirements: unlinked)
+  - Given no QuestionCategory exists / When creating one without id / Then creation fails with required field error
+  - Given no QuestionCategory exists / When creating one without name / Then creation fails with required field error
+  - Given no QuestionCategory exists / When creating one without created_by / Then creation fails with required field error
+  - Given no QuestionCategory exists / When creating one without created_at / Then creation fails with required field error
+  - Given no QuestionCategory exists / When creating one without updated_at / Then creation fails with required field error
+  - Given no QuestionCategory exists / When creating one with valid required fields and organization_id / Then category is persisted with organization_id set
+  - Given no QuestionCategory exists / When creating one with valid required fields and no organization_id / Then category is persisted with organization_id as null
+
+- **TS-PERS-006** — FAQ (requirements: unlinked)
+  - Given no FAQ exists / When creating one without id / Then creation fails with required field error
+  - Given no FAQ exists / When creating one without question / Then creation fails with required field error
+  - Given no FAQ exists / When creating one without answer / Then creation fails with required field error
+  - Given no FAQ exists / When creating one without origin / Then creation fails with required field error
+  - Given no FAQ exists / When creating one without created_by / Then creation fails with required field error
+  - Given no FAQ exists / When creating one without created_at / Then creation fails with required field error
+  - Given no FAQ exists / When creating one without updated_at / Then creation fails with required field error
+  - Given no FAQ exists / When creating one with origin not in (manual, automated) / Then creation fails with enum validation error
+  - Given no FAQ exists / When creating one with valid required fields, question_category_id, and organization_id / Then FAQ is persisted
+  - Given no FAQ exists / When creating one with valid required fields and no question_category_id or organization_id / Then FAQ is persisted with both as null
+
+- **TS-PERS-007** — InteractionLog (requirements: unlinked)
+  - Given no InteractionLog exists / When creating one without id / Then creation fails with required field error
+  - Given no InteractionLog exists / When creating one without user_id / Then creation fails with required field error
+  - Given no InteractionLog exists / When creating one without user_name / Then creation fails with required field error
+  - Given no InteractionLog exists / When creating one without organization_id / Then creation fails with required field error
+  - Given no InteractionLog exists / When creating one without question_text / Then creation fails with required field error
+  - Given no InteractionLog exists / When creating one without response_text / Then creation fails with required field error
+  - Given no InteractionLog exists / When creating one without created_at / Then creation fails with required field error
+  - Given no InteractionLog exists / When creating one with valid required fields and information_source_ids array / Then log is persisted with array stored
+  - Given no InteractionLog exists / When creating one with valid required fields and no information_source_ids / Then log is persisted with information_source_ids as null or empty
+  - Given an InteractionLog exists / When attempting to update any field / Then update is rejected (immutable after creation)
+  - Given an InteractionLog exists / When attempting to delete it / Then deletion is rejected (immutable after creation)
+
+- **TS-PERS-008** — AuditLog (requirements: unlinked)
+  - Given no AuditLog exists / When creating one without id / Then creation fails with required field error
+  - Given no AuditLog exists / When creating one without event_type / Then creation fails with required field error
+  - Given no AuditLog exists / When creating one without created_at / Then creation fails with required field error
+  - Given no AuditLog exists / When creating one with valid required fields and optional actor_user_id, target_entity_type, target_entity_id, organization_id, detail / Then log is persisted with all fields set
+  - Given no AuditLog exists / When creating one with valid required fields and no optional fields / Then log is persisted with optional fields as null
+  - Given an AuditLog exists / When attempting to update any field / Then update is rejected (immutable after creation)
+  - Given an AuditLog exists / When attempting to delete it / Then deletion is rejected (immutable after creation)
+
+- **TS-PERS-009** — InAppAlert (requirements: unlinked)
+  - Given no InAppAlert exists / When creating one without id / Then creation fails with required field error
+  - Given no InAppAlert exists / When creating one without recipient_user_id / Then creation fails with required field error
+  - Given no InAppAlert exists / When creating one without information_source_id / Then creation fails with required field error
+  - Given no InAppAlert exists / When creating one without message / Then creation fails with required field error
+  - Given no InAppAlert exists / When creating one without read / Then creation fails with required field error
+  - Given no InAppAlert exists / When creating one without created_at / Then creation fails with required field error
+  - Given no InAppAlert exists / When creating one with valid required fields and read=false / Then alert is persisted with read as false
+  - Given an InAppAlert exists with read=false / When updating read to true / Then read field is updated and persisted
+  - Given an InAppAlert exists / When reading it / Then all fields including recipient_user_id and information_source_id are accessible
 ## 5. INTEGRATION TEST SCENARIOS (APPLICATION ↔ EXTERNAL SERVICES)
-*Pending — system-derived from DESIGN.md#6. INTEGRATION LAYER (APPLICATION → EXTERNAL SERVICES)*
+- **TS-INT-001** — External LLM API (via LiteLLM) (requirements: unlinked)
+  - Given a user question has been sanitized to remove PII and source code / When the application sends the question to the External LLM API within the 20-second timeout window / Then the LLM returns a generated answer for display to the user
 
+- **TS-INT-002** — External LLM API (via LiteLLM) (requirements: unlinked)
+  - Given a request to the External LLM API is in progress / When the response does not arrive within 20000 ms / Then the application records a SERVICE_TIMEOUT error and initiates retry logic
+
+- **TS-INT-003** — External LLM API (via LiteLLM) (requirements: unlinked)
+  - Given a request to the External LLM API has timed out or failed / When the application has not yet exhausted 3 retry attempts / Then the application retries the request using custom backoff logic
+
+- **TS-INT-004** — External LLM API (via LiteLLM) (requirements: unlinked)
+  - Given a request to the External LLM API has failed with auth_failure error / When all 3 retry attempts are exhausted / Then the application displays a failure-type-specific user-friendly message, sends an in-app alert with message 'authentication failure' to Organization Administrator and Platform Administrator, and degrades to FAQ browse-only mode
+
+- **TS-INT-005** — External LLM API (via LiteLLM) (requirements: unlinked)
+  - Given a request to the External LLM API has failed with rate_limit error / When all 3 retry attempts are exhausted / Then the application displays a failure-type-specific user-friendly message, sends an in-app alert with message 'rate limit exceeded' to Organization Administrator and Platform Administrator, and degrades to FAQ browse-only mode
+
+- **TS-INT-006** — External LLM API (via LiteLLM) (requirements: unlinked)
+  - Given a request to the External LLM API has failed with server_error / When all 3 retry attempts are exhausted / Then the application displays a failure-type-specific user-friendly message, sends an in-app alert with message 'service unavailable' to Organization Administrator and Platform Administrator, and degrades to FAQ browse-only mode
+
+- **TS-INT-007** — External LLM API (via LiteLLM) (requirements: unlinked)
+  - Given the application is configured to call the External LLM API / When establishing the connection / Then TLS is required and enforced
+
+- **TS-INT-008** — External LLM API (via LiteLLM) (requirements: unlinked)
+  - Given the application needs to generate FAQ candidates / When the External LLM API is called with sanitized user questions / Then the API returns generated answers suitable for automated FAQ generation
+
+- **TS-INT-009** — GitHub / Online Repository (requirements: unlinked)
+  - Given GitHub is configured as an information source with a personal access token or OAuth credential stored encrypted at rest / When the application retrieves repository content / Then the content is retrieved read-only without modification
+
+- **TS-INT-010** — GitHub / Online Repository (requirements: unlinked)
+  - Given a request to GitHub is in progress / When the response does not arrive within 20000 ms / Then the application records a SERVICE_TIMEOUT error and initiates retry logic
+
+- **TS-INT-011** — GitHub / Online Repository (requirements: unlinked)
+  - Given a request to GitHub has timed out or failed / When the application has not yet exhausted 3 retry attempts / Then the application retries the request using custom backoff logic
+
+- **TS-INT-012** — GitHub / Online Repository (requirements: unlinked)
+  - Given a request to GitHub has failed with auth_failure error / When all 3 retry attempts are exhausted / Then the application displays a failure-type-specific user-friendly message and sends an in-app alert with message 'authentication failure' to Organization Administrator and Platform Administrator
+
+- **TS-INT-013** — GitHub / Online Repository (requirements: unlinked)
+  - Given a request to GitHub has failed with server_error / When all 3 retry attempts are exhausted / Then the application displays a failure-type-specific user-friendly message and sends an in-app alert with message 'service unavailable' to Organization Administrator and Platform Administrator
+
+- **TS-INT-014** — GitHub / Online Repository (requirements: unlinked)
+  - Given the application is configured to connect to GitHub / When establishing the connection / Then TLS is required and enforced
+
+- **TS-INT-015** — GitHub / Online Repository (requirements: unlinked)
+  - Given GitHub credentials are stored in the secret store / When the application accesses them / Then credentials are decrypted from FIPS 140-2/140-3 validated encrypted-at-rest storage
+
+- **TS-INT-016** — GitHub / Online Repository (requirements: unlinked)
+  - Given the no-execute rule is configured for GitHub / When content is retrieved from the repository / Then the no-execute rule is enforced and execution is prevented
+
+- **TS-INT-017** — MCP Server (requirements: unlinked)
+  - Given one or more MCP Servers are configured as information sources with credentials stored encrypted at rest / When the application retrieves content / Then the content is retrieved read-only without modification
+
+- **TS-INT-018** — MCP Server (requirements: unlinked)
+  - Given a request to an MCP Server is in progress / When the response does not arrive within 20000 ms / Then the application records a SERVICE_TIMEOUT error and initiates retry logic
+
+- **TS-INT-019** — MCP Server (requirements: unlinked)
+  - Given a request to an MCP Server has timed out or failed / When the application has not yet exhausted 3 retry attempts / Then the application retries the request using custom backoff logic
+
+- **TS-INT-020** — MCP Server (requirements: unlinked)
+  - Given a request to an MCP Server has failed with auth_failure error / When all 3 retry attempts are exhausted / Then the application displays a failure-type-specific user-friendly message and sends an in-app alert with message 'authentication failure' to Organization Administrator and Platform Administrator
+
+- **TS-INT-021** — MCP Server (requirements: unlinked)
+  - Given a request to an MCP Server has failed with server_error / When all 3 retry attempts are exhausted / Then the application displays a failure-type-specific user-friendly message and sends an in-app alert with message 'service unavailable' to Organization Administrator and Platform Administrator
+
+- **TS-INT-022** — MCP Server (requirements: unlinked)
+  - Given the application is configured to connect to an MCP Server / When establishing the connection / Then TLS is required and enforced
+
+- **TS-INT-023** — MCP Server (requirements: unlinked)
+  - Given MCP Server credentials are stored in the secret store / When the application accesses them / Then credentials are decrypted from FIPS 140-2/140-3 validated encrypted-at-rest storage
+
+- **TS-INT-024** — MCP Server (requirements: unlinked)
+  - Given the no-execute rule is monitored on the MCP Server integration / When a no-execute rule violation occurs / Then an in-app alert is sent to Platform Administrator and an audit log entry is recorded
 ## 6. SECURITY & FAILURE TESTS (MANDATORY)
 ### FR-001
 
