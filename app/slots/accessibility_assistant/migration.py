@@ -10,8 +10,9 @@
 
 This file is a readable, cumulative reference copy of the slot's full
 schema-as-DDL — it is NOT imported or executed by Alembic (see
-`migrations/versions/0015_accessibility_assistant_slot.py` and
-`migrations/versions/0016_accessibility_assistant_slot_v0_2.py`, which are
+`migrations/versions/0015_accessibility_assistant_slot.py`,
+`migrations/versions/0016_accessibility_assistant_slot_v0_2.py`, and
+`migrations/versions/0017_accessibility_assistant_slot_v0_3.py`, which are
 the real, independently-numbered, additive revisions Alembic runs).
 
 v0.1 (migration 0015) created the three original slot tables:
@@ -26,6 +27,14 @@ authoritative DDL):
   - aa_faq_question_categories, aa_faq_source_categories, aa_faq_sources
   - aa_llm_fallback_configs
   - aa_question_alerts
+
+v0.3 (migration 0017) added, additively (see that file for the exact,
+authoritative DDL):
+  - aa_interaction_logs.helpfulness_rating (+ CHECK constraint) (FR-019)
+  - aa_information_source_categories.is_platform_shared (FR-020)
+  - aa_information_sources.is_platform_shared (FR-020)
+  - aa_faqs.is_platform_shared (FR-020)
+  - aa_faq_generation_sessions, aa_faq_generation_candidates (FR-017)
 
 downgrade() drops everything in reverse dependency order.
 

@@ -13,6 +13,8 @@
 Scope: v0.1 increment — FR-001, FR-002, FR-003, FR-004, FR-005, FR-006,
        SR-001, SR-002, SR-003, SR-004.
 Scope: v0.2 increment — FR-007 through FR-017 (see bottom of file).
+Scope: v0.3 increment — FR-017 through FR-022, SR-005 through SR-007,
+       NFR-001 (see bottom of file).
 
 Tables defined here (v0.1):
   - aa_question_categories   (FR-003: browse FAQs by category)
@@ -28,10 +30,28 @@ Tables added in v0.2 (see bottom of file for the models + full rationale):
   - aa_llm_fallback_configs           (FR-009)
   - aa_question_alerts                (FR-008: unanswerable-question alerts)
 
+Tables added in v0.3 (see bottom of file for the models + full rationale):
+  - aa_faq_generation_sessions        (FR-017: staging sessions for LLM FAQ review)
+  - aa_faq_generation_candidates      (FR-017: staged, human-reviewable FAQ candidates)
+
+Columns added in v0.3 (both nullable/defaulted — existing rows unaffected):
+  - aa_interaction_logs.helpfulness_rating         (FR-019)
+  - aa_information_source_categories.is_platform_shared (FR-020)
+  - aa_information_sources.is_platform_shared           (FR-020)
+  - aa_faqs.is_platform_shared                          (FR-020)
+
 All tables inherit (Base, TenantScoped) for automatic org_id isolation.
 Interaction logs are append-only by application convention (no UPDATE/DELETE
 routes exposed); the column set captures all fields required by FR-006 and
-SR-003.
+SR-003. PT-1/SR-007: InteractionLog is PII-classified (user_id, question_text,
+response_text, and organization all constitute PII per SR-007's own
+classification) — `pii_classified = True` is recorded here as a durable
+docstring-level marker (T-021/SR-007 implementation note) so future
+data-handling tooling (retention, export, anonymization, per PROC-006) has a
+single place to discover this. No mutation route (UPDATE/DELETE) is exposed
+for any interaction-log field except the two explicitly-scoped, immutable-
+once-set rating mechanisms (FR-006's legacy boolean `rating`, FR-019's new
+`helpfulness_rating`) — see service.py for the enforcement.
 
 Soft-delete: NOT used in this slot (ARCHITECTURE.md §2.9 — opt-in only).
 Retention: interaction logs carry retained_until via RetainableFor mixin
@@ -45,6 +65,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -137,6 +158,11 @@ class FAQ(Base, TenantScoped):
     # authoring an FAQ that should match a family of phrasings; it is never
     # required (T-006's acceptance criteria does not mandate it).
     match_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # v0.3 (FR-020): platform-level shared resources are visible read-only to
+    # every org's Organization Administrators/Content Managers. Only a real
+    # Platform Administrator (user.is_superuser) may set this — see
+    # service.py's share_faq/_share_resource.
+    is_platform_shared: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -156,12 +182,15 @@ class FAQ(Base, TenantScoped):
 class InteractionLog(Base, TenantScoped, RetainableFor):
     """Persistent record of every user interaction (FR-006, SR-003, PT-1).
 
-    PII fields: user_id (FK), question_text (may contain user phrasing).
-    Access is restricted by application-layer RBAC (SR-003):
+    pii_classified = True (SR-007): user_id, question_text, response_text
+    and the owning organization all constitute PII per SR-007's own
+    classification. Access is restricted by application-layer RBAC:
       - End users may only read their own records (filtered by user_id).
       - Org admins may read all records in their org (TenantScoped).
-      - Platform admins may read across all orgs.
-      - No UPDATE or DELETE routes are exposed (append-only).
+      - Platform admins may read across all orgs (FR-021, via is_superuser).
+      - No UPDATE or DELETE routes are exposed (append-only) for any field
+        except the two explicitly-scoped, write-once rating mechanisms
+        below.
 
     `session_id` groups multi-turn exchanges (FR-005). It is a
     caller-supplied opaque string (UUID recommended) that the client
@@ -169,13 +198,33 @@ class InteractionLog(Base, TenantScoped, RetainableFor):
 
     `rating` is nullable — null means the user did not submit a rating
     (FR-006 AC: rating field recorded as null or unrated).
-    True = thumbs up, False = thumbs down.
+    True = thumbs up, False = thumbs down. This is the ORIGINAL v0.1/FR-006
+    rating mechanism and remains fully mutable (a second PATCH may change
+    or clear it) — a real, test-verified v0.1 behavior
+    (`test_rate_interaction_null_clears_rating`) that this increment does
+    NOT alter.
+
+    `helpfulness_rating` (v0.3, FR-019) is a SEPARATE, additive,
+    write-once field: `'helpful'` / `'unhelpful'` / NULL, enforced
+    immutable once set by the service layer (RatingAlreadySubmitted -> 409)
+    and structurally (no PUT/PATCH/DELETE route exists for it). FR-019
+    requires immutability, which genuinely conflicts with the legacy
+    `rating` field's existing, tested mutability — so FR-019 is realized as
+    its own column + its own endpoint rather than retrofitting `rating`.
+    See TASKS.md T-019 and the v0.3 completion report for the full
+    rationale.
 
     `sources_json` stores a JSON-serialised list of source identifiers
     used when generating the response (FR-006).
     """
 
     __tablename__ = "aa_interaction_logs"
+    __table_args__ = (
+        CheckConstraint(
+            "helpfulness_rating IN ('helpful', 'unhelpful') OR helpfulness_rating IS NULL",
+            name="ck_aa_interaction_logs_helpfulness_rating",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -202,6 +251,10 @@ class InteractionLog(Base, TenantScoped, RetainableFor):
     sources_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     # Nullable: True=thumbs-up, False=thumbs-down, None=not rated
     rating: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # v0.3 (FR-019): write-once helpfulness rating, distinct from the legacy
+    # `rating` boolean above (see class docstring for why). CHECK-constrained
+    # to 'helpful' / 'unhelpful' / NULL at the DB level.
+    helpfulness_rating: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -270,6 +323,8 @@ class InformationSourceCategory(Base, TenantScoped):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # v0.3 (FR-020): see FAQ.is_platform_shared above for the full rationale.
+    is_platform_shared: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -348,6 +403,8 @@ class InformationSource(Base, TenantScoped):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # v0.3 (FR-020): see FAQ.is_platform_shared above for the full rationale.
+    is_platform_shared: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -522,3 +579,123 @@ class QuestionAlert(Base, TenantScoped):
 
     def __repr__(self) -> str:
         return f"QuestionAlert(id={self.id!r}, acknowledged={self.acknowledged!r})"
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# v0.3 increment — FR-017 through FR-022, SR-005 through SR-007, NFR-001
+# ═════════════════════════════════════════════════════════════════════════
+#
+# New tables added by migration 0017 (additive-only — see Rule 9):
+#   - aa_faq_generation_sessions    (FR-017: only the interaction-log-review
+#     flow, T-007, stages candidates server-side; FR-018's information-source
+#     flow, T-008, is entirely in-memory per its own acceptance criteria and
+#     needs no staging table).
+#   - aa_faq_generation_candidates
+#
+# New columns on existing tables (all nullable/defaulted — see the class
+# docstrings above for the ones on aa_faqs / aa_information_sources /
+# aa_information_source_categories / aa_interaction_logs).
+
+
+class FAQGenerationStatus(enum.StrEnum):
+    """Lifecycle of a T-007/FR-017 FAQ generation session.
+
+    NFR-001's approval gate is what this enum exists to make explicit:
+    a session sits in PENDING_REVIEW (candidates staged, nothing in `aa_faqs`
+    yet) until an authorized user calls the confirm endpoint, which is the
+    ONLY path that ever transitions a session to CONFIRMED and the ONLY path
+    that ever writes to `aa_faqs` for LLM-generated content.
+    """
+
+    PENDING_REVIEW = "pending_review"
+    CONFIRMED = "confirmed"
+
+
+class FAQGenerationCandidateStatus(enum.StrEnum):
+    """Per-candidate outcome once its parent session is confirmed."""
+
+    PENDING_REVIEW = "pending_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class FAQGenerationSession(Base, TenantScoped):
+    """A staged, human-reviewable FAQ-generation session (FR-017, T-007).
+
+    Exists ONLY for the interaction-log-review flow — FR-018's
+    information-source flow (T-008) is explicitly in-memory-only per its own
+    acceptance criteria and never creates a row here. `source_type` is
+    therefore always `"interaction_logs"` today; the column is kept (rather
+    than hardcoded) so a future session-backed generation flow does not need
+    a schema change to plug in.
+    """
+
+    __tablename__ = "aa_faq_generation_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="interaction_logs"
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=FAQGenerationStatus.PENDING_REVIEW.value
+    )
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"FAQGenerationSession(id={self.id!r}, status={self.status!r})"
+
+
+class FAQGenerationCandidate(Base, TenantScoped):
+    """One LLM-drafted FAQ candidate staged for human review (FR-017,
+    NFR-001, T-007).
+
+    Never a source of truth on its own: it is written to `aa_faqs` (via a
+    real, validated `FAQ` + junction rows) ONLY when its parent session is
+    explicitly confirmed with this candidate's id in the approved set.
+    `recommended_*_ids_json` mirror the JSON-string convention already used
+    by `FAQ.citations_json`/`InteractionLog.sources_json` elsewhere in this
+    slot, rather than a fourth set of M:N junction tables for what is, until
+    confirmed, disposable draft data.
+    """
+
+    __tablename__ = "aa_faq_generation_candidates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("aa_faq_generation_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # JSON string: [1, 2, 3] — LLM-recommended ids, advisory only; validated
+    # for real at confirm time (service.py's _resolve_ids_in_org).
+    recommended_question_category_ids_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="[]"
+    )
+    recommended_source_category_ids_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="[]"
+    )
+    recommended_source_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=FAQGenerationCandidateStatus.PENDING_REVIEW.value
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"FAQGenerationCandidate(id={self.id!r}, session_id={self.session_id!r})"

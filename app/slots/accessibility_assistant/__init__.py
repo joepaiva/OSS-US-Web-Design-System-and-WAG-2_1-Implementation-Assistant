@@ -4,7 +4,7 @@
 # AC-3: requires() FastAPI dependency gates routes to permitted roles
 # AC-6: permissions scoped to accessibility_assistant domain only
 # ─────────────────────────────────────────────────────────────────
-"""Accessibility Assistant slot — v0.1 + v0.2.
+"""Accessibility Assistant slot — v0.1 + v0.2 + v0.3.
 
 Registers slot permissions at import time via the chassis RBAC registry.
 
@@ -28,6 +28,28 @@ Permissions added in v0.2 (FR-007 through FR-017):
       Granted to: Platform Administrator, Organization Administrator only.
   assistant:role_manage             — designate a Content Manager within an org.
       Granted to: Platform Administrator, Organization Administrator only.
+
+Permissions added in v0.3 (FR-017 through FR-022, SR-005..SR-007, NFR-001):
+  assistant:platform_share         — designate a resource platform-level shared (FR-020).
+      Route-level gate grants this to the chassis "admin" role (both Platform and
+      Organization Administrators, per the RBAC-collapse note below); the SERVICE
+      layer additionally requires `user.is_superuser` (a genuine Platform
+      Administrator) before the share actually takes effect — see service.py's
+      `_share_resource`. This is the one place in this slot where the
+      Platform-vs-Organization-Administrator distinction that FR-020/FR-027
+      require is enforced explicitly in code rather than via a permission grant,
+      because this chassis's RBAC model has no permission that could express it
+      (see the RBAC-collapse note below).
+  assistant:interaction_log_read   — the FR-021 administrator interaction-log view.
+      Granted to: Platform Administrator, Organization Administrator (via the shared
+      "admin" role); Content Managers and End Users are denied. Deliberately a NEW,
+      separate permission from `assistant:admin` (v0.1's own admin-interactions view)
+      so that the pre-existing `/assistant/admin/interactions` route/tests are not
+      disturbed by FR-021's different (cross-org-for-superusers) scoping.
+  T-007/T-008's two automated-FAQ-generation capabilities (FR-017, FR-018) reuse the
+  existing `assistant:faq_manage` permission rather than adding a new one — their
+  linked personas (Platform Administrator, Organization Administrator, Content
+  Manager) are identical to FAQ_MANAGE's.
 
 Every permission registered here is auto-granted to the chassis "admin"
 role by `seed_chassis_rbac` (it grants ALL registered permissions to
@@ -62,6 +84,10 @@ ASSISTANT_FAQ_MANAGE = "assistant:faq_manage"
 ASSISTANT_LLM_FALLBACK_MANAGE = "assistant:llm_fallback_manage"
 ASSISTANT_ROLE_MANAGE = "assistant:role_manage"
 
+# v0.3 additions.
+ASSISTANT_PLATFORM_SHARE = "assistant:platform_share"
+ASSISTANT_INTERACTION_LOG_READ = "assistant:interaction_log_read"
+
 # The permission set granted to the slot-provisioned "content_manager" role.
 # Exported so service.py's ensure_content_manager_role() stays in sync with
 # this module's own documentation of who gets what.
@@ -89,3 +115,12 @@ register(
     "Configure the LLM fallback mode per source category and question category",
 )
 register(ASSISTANT_ROLE_MANAGE, "Designate Content Managers within an organization")
+register(
+    ASSISTANT_PLATFORM_SHARE,
+    "Designate an information source, information source category, or FAQ as "
+    "platform-level shared",
+)
+register(
+    ASSISTANT_INTERACTION_LOG_READ,
+    "View the administrator interaction log view (Platform/Organization Administrator)",
+)
