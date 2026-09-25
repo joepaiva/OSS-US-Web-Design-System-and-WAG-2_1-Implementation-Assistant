@@ -38,7 +38,9 @@ from app.slots.accessibility_assistant import (
     ASSISTANT_ADMIN,
     ASSISTANT_ASK,
     ASSISTANT_FAQ_MANAGE,
+    ASSISTANT_INTERACTION_LOG_READ,
     ASSISTANT_LLM_FALLBACK_MANAGE,
+    ASSISTANT_PLATFORM_SHARE,
     ASSISTANT_QUESTION_CATEGORY_MANAGE,
     ASSISTANT_READ,
     ASSISTANT_ROLE_MANAGE,
@@ -53,8 +55,19 @@ from app.slots.accessibility_assistant.schemas import (
     ContentManagerAssignRequest,
     ContentManagerAssignResponse,
     FAQCreate,
+    FAQGenerationCandidateRead,
+    FAQGenerationConfirmRequest,
+    FAQGenerationConfirmResponse,
+    FAQGenerationFromSourceConfirmRequest,
+    FAQGenerationFromSourceConfirmResponse,
+    FAQGenerationFromSourceRequest,
+    FAQGenerationFromSourceResponse,
+    FAQGenerationSessionCreate,
+    FAQGenerationSessionCreateResponse,
     FAQRead,
     GitHubVerifyRequest,
+    HelpfulnessRatingCreate,
+    HelpfulnessRatingRead,
     InformationSourceCategoryCreate,
     InformationSourceCategoryRead,
     InformationSourceCreate,
@@ -70,6 +83,7 @@ from app.slots.accessibility_assistant.schemas import (
     QuestionCategoryRead,
     QuestionResponse,
     RateInteractionUpdate,
+    ShareResourceRequest,
     SourceTypeInfo,
     TieredQuestionResponse,
 )
@@ -77,31 +91,41 @@ from app.slots.accessibility_assistant.service import (
     CategoryNotFound,
     ContentBlocked,
     DuplicateCategoryName,
+    FAQGenerationSessionNotFound,
     FAQNotFound,
     FAQValidationError,
     InformationSourceCategoryNotFound,
+    InformationSourceNotFound,
     InteractionLogAccessDenied,
     InteractionLogNotFound,
     LLMFallbackConfigNotFound,
     NotAnOrgMember,
+    PlatformShareDenied,
     QuestionAlertNotFound,
+    RatingAlreadySubmitted,
     SourceTestFailed,
     acknowledge_question_alert,
     answer_question_deterministic_first,
     answer_question_with_fallback,
     ask_question,
     assign_content_manager,
+    confirm_faq_generation_from_source,
+    confirm_faq_generation_session,
     create_faq,
+    create_faq_generation_session_from_logs,
     create_information_source,
     create_information_source_category,
     create_question_category,
     delete_llm_fallback_config,
+    generate_faq_candidates_from_source,
     get_faq,
     get_interaction,
     get_llm_fallback_config,
+    list_faq_generation_candidates,
     list_faqs_by_category,
     list_information_source_categories,
     list_information_sources,
+    list_interaction_logs_admin,
     list_llm_fallback_configs,
     list_my_interactions,
     list_org_interactions,
@@ -109,10 +133,15 @@ from app.slots.accessibility_assistant.service import (
     list_question_categories,
     list_source_types,
     rate_interaction,
+    share_faq,
+    share_information_source,
+    share_information_source_category,
+    submit_helpfulness_rating,
     test_github_access,
     test_local_folder_access,
     test_mcp_connectivity,
     to_faq_read,
+    to_information_source_read,
     upsert_llm_fallback_config,
 )
 
@@ -138,6 +167,11 @@ llm_fallback_config_router = APIRouter(
     prefix="/api/llm-fallback-config", tags=["llm-fallback-config"]
 )
 organization_role_router = APIRouter(prefix="/api/organizations", tags=["organizations"])
+# v0.3 (T-019, T-021): FR-019's rating endpoint and FR-021's administrator
+# log view both operate on interaction logs but don't fit any existing
+# router's resource domain — a new dedicated router, same convention as
+# the v0.2 routers above.
+interaction_log_router = APIRouter(prefix="/api/interaction-logs", tags=["interaction-logs"])
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -220,7 +254,7 @@ async def get_faq_route(
     FR-004: response includes expository text, reasoning, and citations.
     """
     try:
-        return await get_faq(session, faq_id)
+        return await get_faq(session, faq_id, org.id)
     except FAQNotFound as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -462,7 +496,7 @@ async def create_information_source_category_route(
 async def list_information_source_categories_route(
     user: CurrentUser, org: CurrentOrg, session: SessionDep
 ) -> list[InformationSourceCategoryRead]:
-    return await list_information_source_categories(session)
+    return await list_information_source_categories(session, org.id)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -579,7 +613,7 @@ async def test_mcp_route(
 async def list_information_sources_route(
     user: CurrentUser, org: CurrentOrg, session: SessionDep
 ) -> list[InformationSourceRead]:
-    return await list_information_sources(session)
+    return await list_information_sources(session, org.id)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -897,3 +931,296 @@ async def assign_content_manager_route(
     return ContentManagerAssignResponse(
         user_id=payload.user_id, org_id=org.id, role="content_manager"
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# v0.3 increment — FR-017 through FR-022, SR-005 through SR-007, NFR-001
+# ═════════════════════════════════════════════════════════════════════════
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Response Helpfulness Rating (FR-019, T-019)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@interaction_log_router.post(
+    "/{log_id}/rating",
+    response_model=HelpfulnessRatingRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(requires(ASSISTANT_ASK))],
+    summary="Submit a write-once helpfulness rating for an interaction log (FR-019)",
+)
+async def submit_helpfulness_rating_route(
+    log_id: int,
+    payload: HelpfulnessRatingCreate,
+    user: CurrentUser,
+    org: CurrentOrg,
+    session: SessionDep,
+) -> HelpfulnessRatingRead:
+    """FR-019: rating is write-once. A second submission for the same log
+    returns 409; the original rating remains unchanged. No PUT, PATCH, or
+    DELETE route is registered for this sub-resource — the immutability
+    invariant is structural as well as logical.
+    """
+    try:
+        entry = await submit_helpfulness_rating(session, user, log_id, payload.rating)
+    except InteractionLogNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="interaction log not found"
+        ) from exc
+    except InteractionLogAccessDenied as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="access denied") from exc
+    except RatingAlreadySubmitted as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="a rating has already been submitted for this interaction log",
+        ) from exc
+    # payload.rating is already the validated Literal["helpful","unhelpful"] — reuse it
+    # directly rather than re-reading the ORM column (typed as a plain `str`).
+    return HelpfulnessRatingRead(interaction_log_id=entry.id, rating=payload.rating)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Administrator Interaction Log View (FR-021, SR-007, T-021)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@interaction_log_router.get(
+    "/",
+    response_model=list[InteractionLogRead],
+    dependencies=[Depends(requires(ASSISTANT_INTERACTION_LOG_READ))],
+    summary="Administrator interaction log view (FR-021, read-only)",
+)
+async def list_interaction_logs_admin_route(
+    user: CurrentUser, org: CurrentOrg, session: SessionDep
+) -> list[InteractionLogRead]:
+    """A genuine Platform Administrator (user.is_superuser) sees logs across
+    every organization; an Organization Administrator sees only the current
+    org's logs. Content Managers and End Users are denied by the permission
+    gate above. No PUT/PATCH/DELETE route exists for this resource (SR-007).
+    """
+    return await list_interaction_logs_admin(session, user)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Platform-Level Resource Sharing (FR-020, T-020)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@information_source_category_router.patch(
+    "/{category_id}/share",
+    response_model=InformationSourceCategoryRead,
+    dependencies=[Depends(requires(ASSISTANT_PLATFORM_SHARE))],
+    summary="Designate an information source category platform-level shared (FR-020)",
+)
+async def share_information_source_category_route(
+    category_id: int,
+    payload: ShareResourceRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+    session: SessionDep,
+) -> InformationSourceCategoryRead:
+    """Only a genuine Platform Administrator (user.is_superuser) may share a
+    resource — an Organization Administrator or Content Manager holding the
+    route-level permission is still denied (403) by the service layer."""
+    try:
+        category = await share_information_source_category(
+            session, user, category_id, payload.is_shared
+        )
+    except PlatformShareDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="only a Platform Administrator may share this resource",
+        ) from exc
+    except InformationSourceCategoryNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="information source category not found",
+        ) from exc
+    return InformationSourceCategoryRead.model_validate(category)
+
+
+@information_source_router.patch(
+    "/{source_id}/share",
+    response_model=InformationSourceRead,
+    dependencies=[Depends(requires(ASSISTANT_PLATFORM_SHARE))],
+    summary="Designate an information source platform-level shared (FR-020)",
+)
+async def share_information_source_route(
+    source_id: int,
+    payload: ShareResourceRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+    session: SessionDep,
+) -> InformationSourceRead:
+    try:
+        source = await share_information_source(session, user, source_id, payload.is_shared)
+    except PlatformShareDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="only a Platform Administrator may share this resource",
+        ) from exc
+    except InformationSourceNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="information source not found"
+        ) from exc
+    return to_information_source_read(source)
+
+
+@faq_router.patch(
+    "/{faq_id}/share",
+    response_model=FAQRead,
+    dependencies=[Depends(requires(ASSISTANT_PLATFORM_SHARE))],
+    summary="Designate an FAQ platform-level shared (FR-020)",
+)
+async def share_faq_route(
+    faq_id: int,
+    payload: ShareResourceRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+    session: SessionDep,
+) -> FAQRead:
+    try:
+        faq = await share_faq(session, user, faq_id, payload.is_shared)
+    except PlatformShareDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="only a Platform Administrator may share this resource",
+        ) from exc
+    except FAQNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="FAQ not found") from exc
+    return await to_faq_read(session, faq)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Automated FAQ Generation from Interaction Logs (FR-017, NFR-001, T-007)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@faq_router.post(
+    "/generation-sessions/",
+    response_model=FAQGenerationSessionCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(requires(ASSISTANT_FAQ_MANAGE))],
+    summary="Initiate LLM review of interaction logs for FAQ generation (FR-017)",
+)
+async def create_faq_generation_session_route(
+    payload: FAQGenerationSessionCreate,
+    user: CurrentUser,
+    org: CurrentOrg,
+    session: SessionDep,
+) -> FAQGenerationSessionCreateResponse:
+    """Stages LLM-drafted candidates in `pending_review` status. No FAQ row
+    is written here — see the confirm endpoint below (NFR-001)."""
+    gen_session, candidates = await create_faq_generation_session_from_logs(
+        session, user, org.id, payload.max_logs
+    )
+    return FAQGenerationSessionCreateResponse(
+        session_id=gen_session.id, status=gen_session.status, candidate_count=len(candidates)
+    )
+
+
+@faq_router.get(
+    "/generation-sessions/{session_id}/candidates/",
+    response_model=list[FAQGenerationCandidateRead],
+    dependencies=[Depends(requires(ASSISTANT_FAQ_MANAGE))],
+    summary="List staged FAQ candidates for human review (FR-017)",
+)
+async def list_faq_generation_candidates_route(
+    session_id: int, user: CurrentUser, org: CurrentOrg, session: SessionDep
+) -> list[FAQGenerationCandidateRead]:
+    try:
+        return await list_faq_generation_candidates(session, session_id)
+    except FAQGenerationSessionNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="generation session not found"
+        ) from exc
+
+
+@faq_router.post(
+    "/generation-sessions/{session_id}/confirm/",
+    response_model=FAQGenerationConfirmResponse,
+    dependencies=[Depends(requires(ASSISTANT_FAQ_MANAGE))],
+    summary="Persist only the approved FAQ candidates (FR-017, NFR-001)",
+)
+async def confirm_faq_generation_session_route(
+    session_id: int,
+    payload: FAQGenerationConfirmRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+    session: SessionDep,
+) -> FAQGenerationConfirmResponse:
+    """An empty `approved` list is a valid, explicit "save nothing"
+    confirmation (NFR-001). Any unresolvable category/source id in an
+    approved candidate returns 422 and nothing is persisted (atomic)."""
+    try:
+        _, created_faq_ids, discarded_candidate_ids = await confirm_faq_generation_session(
+            session, user, session_id, payload.approved
+        )
+    except FAQGenerationSessionNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="generation session not found"
+        ) from exc
+    except FAQValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.message
+        ) from exc
+    return FAQGenerationConfirmResponse(
+        created_faq_ids=created_faq_ids, discarded_candidate_ids=discarded_candidate_ids
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Automated FAQ Generation from Information Source (FR-018, NFR-001, T-008)
+# ────────────────────────────────────────────────────────────────────────
+
+
+@faq_router.post(
+    "/generate",
+    response_model=FAQGenerationFromSourceResponse,
+    dependencies=[Depends(requires(ASSISTANT_FAQ_MANAGE))],
+    summary="Generate in-memory FAQ candidates from an information source (FR-018)",
+)
+async def generate_faq_from_source_route(
+    payload: FAQGenerationFromSourceRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+    session: SessionDep,
+) -> FAQGenerationFromSourceResponse:
+    """Candidates are returned in-memory only — nothing is persisted until
+    the confirm endpoint below is called (NFR-001). SR-005/SR-006: source
+    content matching a no-execute/injection pattern, or containing source
+    code, is never sent to the LLM — the response reports `blocked=true`
+    with zero candidates instead.
+    """
+    try:
+        return await generate_faq_candidates_from_source(
+            session, user, org.id, payload.source_id, payload.max_content_bytes
+        )
+    except InformationSourceNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="information source not found"
+        ) from exc
+
+
+@faq_router.post(
+    "/generate/confirm",
+    response_model=FAQGenerationFromSourceConfirmResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(requires(ASSISTANT_FAQ_MANAGE))],
+    summary="Persist approved FAQ candidates generated from a source (FR-018, NFR-001)",
+)
+async def confirm_faq_from_source_route(
+    payload: FAQGenerationFromSourceConfirmRequest,
+    user: CurrentUser,
+    org: CurrentOrg,
+    session: SessionDep,
+) -> FAQGenerationFromSourceConfirmResponse:
+    """Atomic: every candidate is validated before any is persisted."""
+    try:
+        created_ids = await confirm_faq_generation_from_source(session, user, payload.candidates)
+    except FAQValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.message
+        ) from exc
+    return FAQGenerationFromSourceConfirmResponse(created_faq_ids=created_ids)

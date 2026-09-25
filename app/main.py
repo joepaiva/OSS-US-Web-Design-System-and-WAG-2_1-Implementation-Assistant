@@ -43,6 +43,9 @@ from app.slots.accessibility_assistant.routes import (
     information_source_router as accessibility_assistant_information_source_router,
 )
 from app.slots.accessibility_assistant.routes import (
+    interaction_log_router as accessibility_assistant_interaction_log_router,
+)
+from app.slots.accessibility_assistant.routes import (
     llm_fallback_config_router as accessibility_assistant_llm_fallback_config_router,
 )
 from app.slots.accessibility_assistant.routes import (
@@ -204,6 +207,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(accessibility_assistant_question_router)
     app.include_router(accessibility_assistant_llm_fallback_config_router)
     app.include_router(accessibility_assistant_organization_role_router)
+    # v0.3 (T-019, T-021) — interaction-log rating + administrator log view.
+    app.include_router(accessibility_assistant_interaction_log_router)
     # LLM-generated slots register here. One include_router call per slot.
     app.include_router(example_router)
     app.include_router(example_with_states_router)
