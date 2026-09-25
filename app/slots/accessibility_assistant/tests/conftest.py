@@ -406,3 +406,84 @@ async def platform_admin_token(
         "user": auth["user"],
         "org": org,
     }
+
+
+# ════════════════════════════════════════════════════════════════════════
+# v0.4 additions (CON-001..CON-006, FR-025..FR-027, NFR-002)
+# ════════════════════════════════════════════════════════════════════════
+
+
+@pytest_asyncio.fixture
+async def platform_admin_source_category(
+    client: AsyncClient,
+    platform_admin_token: dict[str, object],
+    session: AsyncSession,
+) -> dict[str, object]:
+    """An InformationSourceCategory created by a genuine Platform
+    Administrator, in the platform admin's OWN org — i.e. FR-027-eligible
+    for platform-level sharing (`creator_role_snapshot == "platform_admin"`).
+    Distinct from `seeded_source_category`, which is created by an ordinary
+    org admin and is therefore FR-027-INELIGIBLE (used as that negative
+    test case in test_v0_4.py)."""
+    from app.db import set_current_org_id
+    from app.slots.accessibility_assistant.models import InformationSourceCategory
+
+    org = cast(dict[str, object], platform_admin_token["org"])
+    org_id = cast(int, org["id"])
+    user_id = cast(int, cast(dict[str, object], platform_admin_token["user"])["id"])
+    set_current_org_id(org_id)
+
+    category = InformationSourceCategory(
+        name="Platform Admin Source Category",
+        org_id=org_id,
+        created_by_user_id=user_id,
+        creator_role_snapshot="platform_admin",
+    )
+    session.add(category)
+    await session.flush()
+    await session.commit()
+    return {"id": category.id, "name": category.name, "org_id": org_id}
+
+
+@pytest_asyncio.fixture
+async def platform_admin_information_source(
+    client: AsyncClient,
+    platform_admin_token: dict[str, object],
+    platform_admin_source_category: dict[str, object],
+    session: AsyncSession,
+) -> dict[str, object]:
+    """An InformationSource created by a genuine Platform Administrator, in
+    the platform admin's OWN org — FR-027-eligible for platform-level
+    sharing. Distinct from `seeded_information_source` (org-admin-created,
+    FR-027-ineligible)."""
+    from app.db import set_current_org_id
+    from app.slots.accessibility_assistant.models import (
+        InformationSource,
+        InformationSourceTestStatus,
+        InformationSourceType,
+    )
+
+    org_id = cast(int, platform_admin_source_category["org_id"])
+    user_id = cast(int, cast(dict[str, object], platform_admin_token["user"])["id"])
+    category_id = cast(int, platform_admin_source_category["id"])
+    set_current_org_id(org_id)
+
+    source = InformationSource(
+        category_id=category_id,
+        name="Platform Admin Source",
+        source_type=InformationSourceType.GITHUB_ONLINE_REPO.value,
+        github_url="https://github.com/example/platform-admin-repo",
+        test_status=InformationSourceTestStatus.SUCCESS.value,
+        org_id=org_id,
+        created_by_user_id=user_id,
+        creator_role_snapshot="platform_admin",
+    )
+    session.add(source)
+    await session.flush()
+    await session.commit()
+    return {
+        "id": source.id,
+        "name": source.name,
+        "category_id": category_id,
+        "org_id": org_id,
+    }

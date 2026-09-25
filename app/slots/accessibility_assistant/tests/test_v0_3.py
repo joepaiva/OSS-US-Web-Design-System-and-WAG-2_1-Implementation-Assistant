@@ -220,15 +220,23 @@ async def test_submit_helpfulness_rating_cross_user_same_org_403(
 @pytest.mark.asyncio
 async def test_share_information_source_happy_path_and_cross_org_visibility(
     client: AsyncClient,
-    org_with_roles: dict[str, object],
-    seeded_information_source: dict[str, object],
     platform_admin_token: dict[str, object],
+    platform_admin_information_source: dict[str, object],
     other_user_token: dict[str, object],
 ) -> None:
-    # TS-FR020-1 / TS-FR020-happy: a Platform Administrator shares a resource;
-    # it becomes visible read-only to other orgs' admins/content managers.
+    # TS-FR020-1 / TS-FR020-happy: a Platform Administrator shares a
+    # resource THEY THEMSELVES created; it becomes visible read-only to
+    # other orgs' admins/content managers.
+    #
+    # v0.4 (FR-027) note: this test previously shared `seeded_information_
+    # source` (created by org_with_roles's ORDINARY org admin). FR-027 now
+    # requires the SHARED resource to have been created by a genuine
+    # Platform Administrator, so this test uses the new
+    # `platform_admin_information_source` fixture instead —
+    # `seeded_information_source` now exercises FR-027's negative case (see
+    # test_v0_4.py's test_share_information_source_ineligible_creator_denied).
     resp = await client.patch(
-        f"/api/information-sources/{seeded_information_source['id']}/share",
+        f"/api/information-sources/{platform_admin_information_source['id']}/share",
         json={"is_shared": True},
         headers=_platform_admin_headers(platform_admin_token),
     )
@@ -239,7 +247,7 @@ async def test_share_information_source_happy_path_and_cross_org_visibility(
     list_resp = await client.get("/api/information-sources/", headers=other_headers)
     assert list_resp.status_code == 200
     ids = [s["id"] for s in list_resp.json()]
-    assert seeded_information_source["id"] in ids
+    assert platform_admin_information_source["id"] in ids
 
 
 @pytest.mark.asyncio
@@ -290,12 +298,15 @@ async def test_share_information_source_unknown_id_404(
 async def test_share_information_source_category_happy_and_denied(
     client: AsyncClient,
     org_with_roles: dict[str, object],
-    seeded_source_category: dict[str, object],
+    platform_admin_source_category: dict[str, object],
     platform_admin_token: dict[str, object],
     other_user_token: dict[str, object],
 ) -> None:
+    # v0.4 (FR-027) note: uses `platform_admin_source_category` (created by
+    # a genuine Platform Administrator) instead of `seeded_source_category`
+    # (org-admin-created, now FR-027-ineligible — see test_v0_4.py).
     resp = await client.patch(
-        f"/api/information-source-categories/{seeded_source_category['id']}/share",
+        f"/api/information-source-categories/{platform_admin_source_category['id']}/share",
         json={"is_shared": True},
         headers=_platform_admin_headers(platform_admin_token),
     )
@@ -304,10 +315,10 @@ async def test_share_information_source_category_happy_and_denied(
 
     other_headers = cast(dict[str, str], other_user_token["headers"])
     list_resp = await client.get("/api/information-source-categories/", headers=other_headers)
-    assert seeded_source_category["id"] in [c["id"] for c in list_resp.json()]
+    assert platform_admin_source_category["id"] in [c["id"] for c in list_resp.json()]
 
     denied = await client.patch(
-        f"/api/information-source-categories/{seeded_source_category['id']}/share",
+        f"/api/information-source-categories/{platform_admin_source_category['id']}/share",
         json={"is_shared": True},
         headers=_admin_headers(org_with_roles),
     )
@@ -325,23 +336,32 @@ async def test_share_information_source_category_happy_and_denied(
 async def test_share_faq_happy_and_denied(
     client: AsyncClient,
     org_with_roles: dict[str, object],
-    seeded_source_category: dict[str, object],
-    seeded_information_source: dict[str, object],
     platform_admin_token: dict[str, object],
+    platform_admin_source_category: dict[str, object],
+    platform_admin_information_source: dict[str, object],
     other_user_token: dict[str, object],
 ) -> None:
-    admin_headers = _admin_headers(org_with_roles)
-    qcat_id = await _make_question_category(client, admin_headers, "Shareable Category")
+    # v0.4 (FR-027) note: the FAQ (and the source category/source it
+    # references) are created BY THE PLATFORM ADMINISTRATOR, in their own
+    # org — FR-027 requires the shared resource's OWN creator to have held
+    # the Platform Administrator role, not merely the actor performing the
+    # share. Previously this FAQ was created by org_with_roles's ordinary
+    # org admin, which FR-027 now correctly rejects (see test_v0_4.py's
+    # negative-case test for that exact scenario).
+    platform_admin_headers = _platform_admin_headers(platform_admin_token)
+    qcat_id = await _make_question_category(
+        client, platform_admin_headers, "Shareable Category"
+    )
     create_resp = await client.post(
         "/api/faqs/",
         json={
             "question": "Is this FAQ shareable?",
             "answer": "Yes, once a Platform Administrator shares it.",
             "question_category_ids": [qcat_id],
-            "source_category_ids": [seeded_source_category["id"]],
-            "source_ids": [seeded_information_source["id"]],
+            "source_category_ids": [platform_admin_source_category["id"]],
+            "source_ids": [platform_admin_information_source["id"]],
         },
-        headers=admin_headers,
+        headers=platform_admin_headers,
     )
     assert create_resp.status_code == 201, create_resp.text
     faq_id = create_resp.json()["id"]
@@ -350,7 +370,7 @@ async def test_share_faq_happy_and_denied(
     resp = await client.patch(
         f"/api/faqs/{faq_id}/share",
         json={"is_shared": True},
-        headers=_platform_admin_headers(platform_admin_token),
+        headers=platform_admin_headers,
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["is_platform_shared"] is True
