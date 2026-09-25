@@ -1,4 +1,9 @@
 # Accessibility Assistant — Design
+
+**Specification Version:** 1.6.0
+**Generated:** 2026-09-25 16:46 EDT
+**Approved By:** Joe Paiva, Alignment Authority
+
 <!-- @owned-by:  | @role: system | @system-derives-from:  | @locked-by-chassis: true -->
 ## Platform Chassis — AI-Executable Design Specification (Python 3.12 · FastAPI · SQLAlchemy 2.0 async)
 

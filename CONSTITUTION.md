@@ -1,5 +1,9 @@
 # Accessibility Assistant — Constitution
 
+**Specification Version:** 1.6.0
+**Generated:** 2026-09-25 16:46 EDT
+**Approved By:** Joe Paiva, Alignment Authority
+
 **Chassis:** Python — Multi-Tenant, FISMA Moderate + LLM (Chassis Program) v1.3.3
 **Status:** Immutable — chassis-locked. Read-only in the Spec Builder.
 
