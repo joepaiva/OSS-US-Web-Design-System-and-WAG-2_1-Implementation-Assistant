@@ -36,6 +36,12 @@ authoritative DDL):
   - aa_faqs.is_platform_shared (FR-020)
   - aa_faq_generation_sessions, aa_faq_generation_candidates (FR-017)
 
+v0.4 (migration 0018) added, additively (see that file for the exact,
+authoritative DDL):
+  - aa_information_source_categories.creator_role_snapshot (FR-027)
+  - aa_information_sources.creator_role_snapshot (FR-027)
+  - aa_faqs.creator_role_snapshot (FR-027)
+
 downgrade() drops everything in reverse dependency order.
 
 Columns match models.py exactly. The `op` and `sa` names are injected

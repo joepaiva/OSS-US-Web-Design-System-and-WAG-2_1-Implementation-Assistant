@@ -40,6 +40,11 @@ Columns added in v0.3 (both nullable/defaulted — existing rows unaffected):
   - aa_information_sources.is_platform_shared           (FR-020)
   - aa_faqs.is_platform_shared                          (FR-020)
 
+Columns added in v0.4 (nullable — existing rows unaffected; see FR-027):
+  - aa_information_source_categories.creator_role_snapshot (FR-027)
+  - aa_information_sources.creator_role_snapshot           (FR-027)
+  - aa_faqs.creator_role_snapshot                          (FR-027)
+
 All tables inherit (Base, TenantScoped) for automatic org_id isolation.
 Interaction logs are append-only by application convention (no UPDATE/DELETE
 routes exposed); the column set captures all fields required by FR-006 and
@@ -163,6 +168,14 @@ class FAQ(Base, TenantScoped):
     # Platform Administrator (user.is_superuser) may set this — see
     # service.py's share_faq/_share_resource.
     is_platform_shared: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # v0.4 (FR-027): a durable, write-once-at-creation snapshot of the
+    # creator's role ("platform_admin" or "other"), so eligibility for
+    # platform-level sharing can never drift if the creator's role changes
+    # later. NULL means "created before this column existed" (or inserted
+    # directly via ORM bypassing the service layer) — such rows are simply
+    # never eligible for promotion (fail closed) until recreated through the
+    # real creation path. See service.py's _share_resource.
+    creator_role_snapshot: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -325,6 +338,8 @@ class InformationSourceCategory(Base, TenantScoped):
     )
     # v0.3 (FR-020): see FAQ.is_platform_shared above for the full rationale.
     is_platform_shared: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # v0.4 (FR-027): see FAQ.creator_role_snapshot above for the full rationale.
+    creator_role_snapshot: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -405,6 +420,8 @@ class InformationSource(Base, TenantScoped):
     )
     # v0.3 (FR-020): see FAQ.is_platform_shared above for the full rationale.
     is_platform_shared: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # v0.4 (FR-027): see FAQ.creator_role_snapshot above for the full rationale.
+    creator_role_snapshot: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
