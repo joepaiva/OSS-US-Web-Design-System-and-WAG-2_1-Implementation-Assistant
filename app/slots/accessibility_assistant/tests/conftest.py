@@ -24,6 +24,17 @@ v0.2 additions (FR-007 through FR-017):
                               docstring).
   - seeded_source_category  — an InformationSourceCategory in org_with_roles
   - seeded_information_source — an InformationSource in org_with_roles
+
+v0.3 additions (FR-017 through FR-022, SR-005..SR-007, NFR-001):
+  - platform_admin_token    — a GENUINE Platform Administrator: is_superuser=True
+                              + mfa_enabled=True (mirrors tests/test_admin.py's own
+                              `_promote_to_superuser` precedent), belonging to its
+                              OWN, separate org. This is what makes FR-020's
+                              (share) and FR-021's (cross-org log view) real
+                              Platform-vs-Organization-Administrator distinction
+                              testable — `org_with_roles["admin"]` is only an
+                              org-scoped admin (per-org Membership role), never a
+                              real superuser (see that fixture's own docstring).
 """
 
 from __future__ import annotations
@@ -33,6 +44,7 @@ from typing import cast
 
 import pytest_asyncio
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.conftest import make_org, make_user  # noqa: F401
@@ -353,3 +365,44 @@ async def seeded_information_source(
     await session.flush()
     await session.commit()
     return {"id": source.id, "name": source.name, "category_id": category_id, "org_id": org_id}
+
+
+# ════════════════════════════════════════════════════════════════════════
+# v0.3 additions (FR-017 through FR-022, SR-005..SR-007, NFR-001)
+# ════════════════════════════════════════════════════════════════════════
+
+
+@pytest_asyncio.fixture
+async def platform_admin_token(
+    client: AsyncClient, session: AsyncSession
+) -> AsyncIterator[dict[str, object]]:
+    """A genuine Platform Administrator: is_superuser=True + mfa_enabled=True
+    (mirrors tests/test_admin.py's own `_promote_to_superuser` precedent),
+    with its OWN separate org so it has a valid default-org context while
+    still being able to act across every other org (FR-020's share action,
+    FR-021's cross-org log view, FR-022's alert recipients all key off
+    `user.is_superuser` — see service.py)."""
+    from app.auth.models import User
+
+    auth = await make_user(
+        client, email="platformadmin@example.com", password="TestPassword123!"
+    )
+    org = await make_org(
+        client,
+        cast(dict[str, str], auth["headers"]),
+        name="Platform Admin Org",
+        slug="platform-admin-org",
+    )
+    user_id = cast(int, cast(dict[str, object], auth["user"])["id"])
+    result = await session.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one()
+    user.is_superuser = True
+    user.mfa_enabled = True
+    await session.commit()
+
+    yield {
+        "token": auth["token"],
+        "headers": auth["headers"],
+        "user": auth["user"],
+        "org": org,
+    }
